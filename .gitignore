@@ -1,0 +1,55 @@
+# ── Config & Secrets ──────────────────────────────────────────────────────────
+# Contains your API key — never commit this file.
+# Copy config.example.json and rename it to config.json to get started.
+config.json
+
+# ── Session & User Data ───────────────────────────────────────────────────────
+# Saved conversation history; may contain sensitive information.
+session.json
+
+# ── Skills (User-Created Workflows) ──────────────────────────────────────────
+# Skill files are generated at runtime by the agent and are personal to each
+# user's setup. They are not part of the source code.
+skills/
+
+# ── Python ────────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+*.whl
+MANIFEST
+
+# ── Virtual Environments ──────────────────────────────────────────────────────
+.venv/
+venv/
+env/
+ENV/
+.virtualenv/
+
+# ── IDEs & Editors ────────────────────────────────────────────────────────────
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# ── Coverage & Testing ────────────────────────────────────────────────────────
+.coverage
+.pytest_cache/
+htmlcov/
+coverage.xml
+*.cover
+
+# ── Type Checking ─────────────────────────────────────────────────────────────
+.mypy_cache/
+.pytype/
+.ruff_cache/

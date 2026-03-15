@@ -1,0 +1,20 @@
+[project]
+name = "minicoder"
+version = "0.1.0"
+description = "A lightweight agentic CLI coding assistant powered by any OpenAI-compatible LLM"
+readme = "README.md"
+license = { file = "LICENSE" }
+requires-python = ">=3.10"
+dependencies = [
+    "openai>=1.0",
+    "httpx>=0.24",
+    "prompt_toolkit>=3.0",
+    "rich>=13.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/YOUR_USERNAME/MiniCoder"
+Issues   = "https://github.com/YOUR_USERNAME/MiniCoder/issues"
+
+[project.scripts]
+minicoder = "main:main"
