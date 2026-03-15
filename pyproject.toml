@@ -13,8 +13,8 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/YOUR_USERNAME/MiniCoder"
-Issues   = "https://github.com/YOUR_USERNAME/MiniCoder/issues"
+Homepage = "https://github.com/jackrx259/MiniCoder"
+Issues   = "https://github.com/jackrx259/MiniCoder/issues"
 
 [project.scripts]
 minicoder = "main:main"

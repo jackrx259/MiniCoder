@@ -2,23 +2,260 @@ import os
 import json
 import fnmatch
 import difflib
+import threading
+import subprocess
+import uuid
+import time
+from datetime import datetime
+
+
+# ---------------------------------------------------------------------------
+# TodoManager — Structured Task Tracking
+# ---------------------------------------------------------------------------
+
+class TodoManager:
+    """
+    Tracks a structured task list with statuses: pending | in_progress | done.
+    Only one task can be `in_progress` at a time (enforces sequential focus).
+    """
+
+    def __init__(self):
+        self.items: list[dict] = []
+
+    def update(self, items: list) -> str:
+        """
+        Replace the full task list. Validates that only one item is in_progress.
+        Each item: {id: str, text: str, status: 'pending'|'in_progress'|'done'}
+        """
+        validated = []
+        in_progress_count = 0
+        for item in items:
+            item_id = str(item.get("id", "")).strip()
+            text = str(item.get("text", "")).strip()
+            status = str(item.get("status", "pending")).strip()
+            if status not in ("pending", "in_progress", "done"):
+                status = "pending"
+            if status == "in_progress":
+                in_progress_count += 1
+            if in_progress_count > 1:
+                return "Error: Only one task can be 'in_progress' at a time."
+            validated.append({"id": item_id, "text": text, "status": status})
+        self.items = validated
+        return self.render()
+
+    def render(self) -> str:
+        """Returns a formatted string of the current task list."""
+        if not self.items:
+            return "📋 Todo list is empty."
+        icons = {"pending": "⬜", "in_progress": "🔄", "done": "✅"}
+        lines = ["📋 Current Tasks:"]
+        for item in self.items:
+            icon = icons.get(item["status"], "⬜")
+            lines.append(f"  {icon} [{item['id']}] {item['text']}")
+        return "\n".join(lines)
+
+    def has_items(self) -> bool:
+        return bool(self.items)
+
+    def pending_count(self) -> int:
+        return sum(1 for i in self.items if i["status"] != "done")
+
+
+# Module-level singleton shared by the tool functions and Agent
+TODO_MANAGER = TodoManager()
+
+
+def todo_write(items: list) -> str:
+    """
+    Update the structured task list. Use this to plan, track and reflect
+    progress across multi-step tasks.
+    
+    Each item must have: id (str), text (str), status ('pending'|'in_progress'|'done').
+    Only one item can be 'in_progress' at a time.
+    """
+    return TODO_MANAGER.update(items)
+
+
+# ---------------------------------------------------------------------------
+# BackgroundManager — Background Task Execution
+# ---------------------------------------------------------------------------
+
+class BackgroundManager:
+    """
+    Long-running commands go here instead of run_command so they don't block
+    the main thread. Results land in a notification queue that the agent drains
+    before each LLM call.
+    """
+
+    def __init__(self):
+        self._tasks: dict[str, dict] = {}
+        self._notification_queue: list[dict] = []
+        self._lock = threading.Lock()
+
+    def run(self, command: str, timeout: int = 300) -> str:
+        """Launch a command in a background daemon thread. Returns immediately."""
+        task_id = str(uuid.uuid4())[:8]
+        with self._lock:
+            self._tasks[task_id] = {
+                "status": "running",
+                "command": command,
+                "started_at": datetime.now().isoformat(timespec="seconds"),
+                "output": None,
+                "exit_code": None,
+            }
+        thread = threading.Thread(
+            target=self._execute,
+            args=(task_id, command, timeout),
+            daemon=True,
+        )
+        thread.start()
+        return f"🚀 Background task [{task_id}] started: {command!r}"
+
+    def _execute(self, task_id: str, command: str, timeout: int):
+        """Worker that runs in a daemon thread and stores the result when done."""
+        try:
+            result = subprocess.run(
+                command,
+                shell=True,
+                capture_output=True,
+                timeout=timeout,
+                encoding="utf-8",
+                errors="replace",
+            )
+            output = (result.stdout + result.stderr).strip()
+            exit_code = result.returncode
+        except subprocess.TimeoutExpired:
+            output = f"⏰ Timeout after {timeout}s"
+            exit_code = -1
+        except Exception as e:
+            output = f"Error: {e}"
+            exit_code = -2
+
+        # Cap output so a noisy command doesn't bloat the notification payload
+        if len(output) > 4000:
+            output = output[:4000] + "\n...[truncated]"
+
+        with self._lock:
+            self._tasks[task_id].update({
+                "status": "done",
+                "output": output,
+                "exit_code": exit_code,
+                "finished_at": datetime.now().isoformat(timespec="seconds"),
+            })
+            self._notification_queue.append({
+                "task_id": task_id,
+                "command": command,
+                "exit_code": exit_code,
+                "output_preview": output[:300],
+            })
+
+    def check(self, task_id: str) -> str:
+        """Look up a background task's current status and output by ID."""
+        with self._lock:
+            task = self._tasks.get(task_id)
+        if not task:
+            ids = list(self._tasks.keys())
+            return f"Unknown task ID '{task_id}'. Known IDs: {ids}"
+        if task["status"] == "running":
+            return (
+                f"⏳ Task [{task_id}] is still running.\n"
+                f"   Command: {task['command']!r}\n"
+                f"   Started: {task['started_at']}"
+            )
+        return (
+            f"✅ Task [{task_id}] finished (exit={task['exit_code']})\n"
+            f"   Command: {task['command']!r}\n"
+            f"   Started:  {task['started_at']}\n"
+            f"   Finished: {task.get('finished_at', '?')}\n"
+            f"--- Output ---\n{task['output'] or '(no output)'}"
+        )
+
+    def drain_notifications(self) -> list[dict]:
+        """Take all pending completion notifications off the queue and return them."""
+        with self._lock:
+            notifs = list(self._notification_queue)
+            self._notification_queue.clear()
+        return notifs
+
+    def list_all(self) -> str:
+        """List all background tasks and their statuses."""
+        with self._lock:
+            tasks = dict(self._tasks)
+        if not tasks:
+            return "No background tasks have been started."
+        lines = ["Background tasks:"]
+        for tid, info in tasks.items():
+            status_icon = "⏳" if info["status"] == "running" else "✅"
+            lines.append(
+                f"  {status_icon} [{tid}] {info['command']!r} — {info['status']}"
+            )
+        return "\n".join(lines)
+
+
+# Global singleton
+BG_MANAGER = BackgroundManager()
+
+
+def run_background(command: str, timeout: int = 300) -> str:
+    """
+    Run a shell command asynchronously in the background.
+    Returns immediately with a task_id. Use check_background(task_id) to poll.
+    The agent will be automatically notified when the task completes.
+    """
+    return BG_MANAGER.run(command, timeout)
+
+
+def check_background(task_id: str) -> str:
+    """
+    Check the status and output of a previously started background task.
+    Use 'all' as task_id to list every background task.
+    """
+    if task_id.lower() == "all":
+        return BG_MANAGER.list_all()
+    return BG_MANAGER.check(task_id)
 
 
 # ---------------------------------------------------------------------------
 # File I/O Tools
 # ---------------------------------------------------------------------------
 
-def read_file(path: str) -> str:
-    """Read contents of a file. Returns truncated content if file is too large."""
+def read_file(path: str, start_line: int = None, end_line: int = None) -> str:
+    """Read contents of a file. Optionally specify a line range (1-indexed, inclusive).
+    
+    When reading large files, use get_file_info first to check line count,
+    then read specific sections with start_line/end_line to avoid truncation.
+    """
     try:
         if not os.path.exists(path):
             return f"Error: File '{path}' does not exist."
 
+        # If line range requested, bypass the 100KB size limit
+        if start_line is not None or end_line is not None:
+            with open(path, 'r', encoding='utf-8', errors='replace') as f:
+                all_lines = f.readlines()
+
+            total = len(all_lines)
+            s = max(1, start_line or 1)
+            e = min(total, end_line or total)
+
+            if s > total:
+                return f"Error: start_line {s} exceeds file length ({total} lines)."
+
+            selected = all_lines[s - 1:e]
+            content = "".join(selected)
+            header = f"[Lines {s}–{e} of {total} total]\n"
+
+            if len(content) > 30000:
+                content = content[:30000] + "\n...[TRUNCATED — range too large, narrow the line range]"
+            return header + content
+
+        # Full-file read: apply size and content limits
         file_size = os.path.getsize(path)
         if file_size > 100 * 1024:
             return (
                 f"Error: File '{path}' is too large ({file_size:,} bytes). "
-                "Max allowed is 100 KB. Consider reading specific line ranges with run_command."
+                "Max allowed for full read is 100 KB. "
+                "Use get_file_info to check line count, then read with start_line/end_line."
             )
 
         with open(path, 'r', encoding='utf-8', errors='replace') as f:
@@ -26,14 +263,50 @@ def read_file(path: str) -> str:
 
         if len(content) > 30000:
             return (
-                    f"[Content truncated — full length {len(content):,} chars. "
-                    f"Showing first 30,000 chars]\n"
-                    + content[:30000]
-                    + "\n...[TRUNCATED]"
+                f"[Content truncated — full length {len(content):,} chars. "
+                f"Showing first 30,000 chars]\n"
+                + content[:30000]
+                + "\n...[TRUNCATED — use start_line/end_line for the rest]"
             )
         return content
     except Exception as e:
         return f"Error reading file '{path}': {e}"
+
+
+def get_file_info(path: str) -> str:
+    """Return metadata about a file: size, line count, encoding hint, last modified.
+    
+    Use this before read_file on large files to plan which line ranges to read.
+    """
+    try:
+        if not os.path.exists(path):
+            return f"Error: File '{path}' does not exist."
+        if os.path.isdir(path):
+            return f"Error: '{path}' is a directory, not a file."
+
+        stat = os.stat(path)
+        size_bytes = stat.st_size
+        mtime = datetime.fromtimestamp(stat.st_mtime).strftime("%Y-%m-%d %H:%M:%S")
+
+        # Count lines without loading everything into memory
+        try:
+            with open(path, 'r', encoding='utf-8', errors='replace') as f:
+                line_count = sum(1 for _ in f)
+            encoding = "utf-8"
+        except Exception:
+            line_count = None
+            encoding = "binary/unknown"
+
+        lines_str = f"{line_count:,}" if line_count is not None else "N/A (binary)"
+        return (
+            f"📄 File: {path}\n"
+            f"   Size:          {_fmt_size(size_bytes)} ({size_bytes:,} bytes)\n"
+            f"   Lines:         {lines_str}\n"
+            f"   Encoding:      {encoding}\n"
+            f"   Last modified: {mtime}"
+        )
+    except Exception as e:
+        return f"Error getting file info for '{path}': {e}"
 
 
 def write_file(path: str, content: str) -> str:
@@ -66,7 +339,7 @@ def replace_in_file(path: str, target: str, replacement: str) -> str:
     """Precision editing: replaces an EXACT string match in a file.
 
     If the target is not found, returns a fuzzy-match hint showing the closest
-    existing lines so the LLM can correct its target string.
+    existing lines to help identify the correct target string.
     """
     try:
         if not os.path.exists(path):
@@ -77,25 +350,24 @@ def replace_in_file(path: str, target: str, replacement: str) -> str:
 
         occurrences = content.count(target)
         if occurrences == 0:
-            # Provide a fuzzy-match hint: show lines closest to the target
             target_lines = target.strip().splitlines()
             file_lines = content.splitlines()
             hint_lines = []
-            for tl in target_lines[:3]:  # Check up to first 3 lines of target
+            for tl in target_lines[:3]:
                 matches = difflib.get_close_matches(tl, file_lines, n=2, cutoff=0.5)
                 if matches:
                     hint_lines.extend(matches)
             hint = ""
             if hint_lines:
                 hint = (
-                        "\n\nFuzzy-match hint — closest existing lines:\n"
-                        + "\n".join(f"  | {ln}" for ln in hint_lines)
-                        + "\n\nCheck exact whitespace, indentation, and newlines."
+                    "\n\nFuzzy-match hint — closest existing lines:\n"
+                    + "\n".join(f"  | {ln}" for ln in hint_lines)
+                    + "\n\nCheck exact whitespace, indentation, and newlines."
                 )
             return (
-                    f"Error: Target text not found in '{path}'. "
-                    f"Please ensure the 'target' matches the file exactly (spaces, tabs, newlines)."
-                    + hint
+                f"Error: Target text not found in '{path}'. "
+                f"Please ensure the 'target' matches the file exactly (spaces, tabs, newlines)."
+                + hint
             )
         elif occurrences > 1:
             return (
@@ -129,7 +401,6 @@ def list_dir(path: str) -> str:
         if not entries:
             return "Directory is empty."
 
-        # Sort: dirs first, then files, alphabetically
         dirs = sorted([e for e in entries if os.path.isdir(os.path.join(path, e))])
         files = sorted([e for e in entries if os.path.isfile(os.path.join(path, e))])
         ordered = dirs + files
@@ -166,7 +437,6 @@ def find_files(directory: str, pattern: str) -> str:
 
         matches = []
         for root, dirs, files in os.walk(directory):
-            # Skip hidden/venv/cache directories
             dirs[:] = [
                 d for d in dirs
                 if not d.startswith('.') and d not in ('__pycache__', 'node_modules', '.git', 'venv', '.venv')
@@ -201,7 +471,6 @@ def search_files(directory: str, query: str, extensions: list = None) -> str:
     """
     try:
         if extensions is None:
-            # Sensible default: all common text file types
             extensions = [
                 'py', 'js', 'ts', 'jsx', 'tsx', 'html', 'css', 'json',
                 'md', 'txt', 'yaml', 'yml', 'toml', 'ini', 'cfg', 'sh',
@@ -236,7 +505,6 @@ def search_files(directory: str, query: str, extensions: list = None) -> str:
         if not results:
             return f"No matches found for '{query}' in '{directory}'."
 
-        # Results are capped at 100 matches; collect and display the same limit for consistency.
         output = "\n".join(results)
         if len(results) == 100:
             output += "\n...(output capped at 100 matches; refine your query to see more)."
@@ -257,7 +525,7 @@ def get_cwd() -> str:
 # Shell Tool
 # ---------------------------------------------------------------------------
 
-# Patterns that could cause irreversible damage
+# Commands I refuse to run — they could cause irreversible damage
 _DANGEROUS_PATTERNS = [
     'rm -rf', 'rm -r /', 'format ',
     'mkfs', 'dd if=', 'shred',
@@ -286,14 +554,12 @@ def run_command(command: str, timeout: int = 60) -> str:
                 "Execution blocked to prevent irreversible damage."
             )
 
-    import subprocess
     try:
         result = subprocess.run(
             command,
             shell=True,
             capture_output=True,
             timeout=timeout,
-            # Handle Windows codepages gracefully
             encoding='utf-8',
             errors='replace',
         )
@@ -310,8 +576,8 @@ def run_command(command: str, timeout: int = 60) -> str:
 
         if len(output) > 10000:
             return (
-                    f"[Output truncated — full length {len(output):,} chars. Showing last 10,000 chars]\n"
-                    + output[-10000:]
+                f"[Output truncated — full length {len(output):,} chars. Showing last 10,000 chars]\n"
+                + output[-10000:]
             )
 
         return output.strip()
@@ -335,16 +601,19 @@ def change_dir(path: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Skills Tool
+# Skills Tools
 # ---------------------------------------------------------------------------
 
+def _get_skills_dir() -> str:
+    return os.path.join(os.path.dirname(os.path.abspath(__file__)), "skills")
+
+
 def create_skill(name: str, description: str, instructions: str) -> str:
-    """Create a new reusable skill/workflow note for the assistant to remember."""
+    """Create a new reusable skill/workflow note and save it to the skills directory."""
     try:
-        skills_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "skills")
+        skills_dir = _get_skills_dir()
         os.makedirs(skills_dir, exist_ok=True)
 
-        # Sanitize filename
         safe_name = "".join(c if c.isalnum() or c in ' _-' else '_' for c in name)
         filename = f"{safe_name.lower().replace(' ', '_')}.md"
         path = os.path.join(skills_dir, filename)
@@ -360,6 +629,83 @@ def create_skill(name: str, description: str, instructions: str) -> str:
         return f"✅ Skill '{name}' saved to '{path}'. It will be loaded in future sessions."
     except Exception as e:
         return f"Error creating skill: {e}"
+
+
+def list_skills() -> str:
+    """List all saved skills with their names and descriptions."""
+    try:
+        skills_dir = _get_skills_dir()
+        if not os.path.exists(skills_dir):
+            return "No skills directory found. No skills have been created yet."
+
+        md_files = sorted([f for f in os.listdir(skills_dir) if f.endswith(".md")])
+        if not md_files:
+            return "No skills saved yet. Use create_skill to add one."
+
+        lines = [f"📚 Saved skills ({len(md_files)} total):"]
+        for filename in md_files:
+            filepath = os.path.join(skills_dir, filename)
+            try:
+                with open(filepath, 'r', encoding='utf-8') as f:
+                    content = f.read()
+                # Extract name and description from YAML frontmatter
+                name = filename
+                description = ""
+                for line in content.splitlines():
+                    if line.startswith("name:"):
+                        name = line.split(":", 1)[1].strip()
+                    elif line.startswith("description:"):
+                        description = line.split(":", 1)[1].strip()
+                    elif line.startswith("---") and description:
+                        break
+                lines.append(f"  📄 {filename}")
+                lines.append(f"     Name: {name}")
+                if description:
+                    lines.append(f"     Desc: {description}")
+            except Exception:
+                lines.append(f"  📄 {filename} (could not read)")
+
+        return "\n".join(lines)
+    except Exception as e:
+        return f"Error listing skills: {e}"
+
+
+def delete_skill(name: str) -> str:
+    """Delete a saved skill by its filename (without .md) or display name.
+    
+    Args:
+        name: The skill filename (e.g. 'deploy_frontend') or a substring to match.
+    """
+    try:
+        skills_dir = _get_skills_dir()
+        if not os.path.exists(skills_dir):
+            return "No skills directory found."
+
+        md_files = [f for f in os.listdir(skills_dir) if f.endswith(".md")]
+
+        # Try exact match first (with or without .md)
+        target = name if name.endswith(".md") else name + ".md"
+        if target in md_files:
+            os.remove(os.path.join(skills_dir, target))
+            return f"✅ Skill '{target}' deleted."
+
+        # Try substring match
+        matches = [f for f in md_files if name.lower() in f.lower()]
+        if len(matches) == 1:
+            os.remove(os.path.join(skills_dir, matches[0]))
+            return f"✅ Skill '{matches[0]}' deleted."
+        elif len(matches) > 1:
+            return (
+                f"Ambiguous: '{name}' matches multiple skills: {matches}. "
+                "Please provide a more specific name."
+            )
+        else:
+            return (
+                f"Skill '{name}' not found. "
+                f"Available skills: {md_files}"
+            )
+    except Exception as e:
+        return f"Error deleting skill: {e}"
 
 
 # ---------------------------------------------------------------------------
@@ -383,18 +729,74 @@ def _fmt_size(n: int) -> str:
 # ---------------------------------------------------------------------------
 
 TOOLS_SCHEMA = [
+    # ── Todo / Task Tracking ────────────────────────────────────────────────
+    {
+        "type": "function",
+        "function": {
+            "name": "todo_write",
+            "description": (
+                "Update the structured task list. Use at the start of multi-step tasks to plan, "
+                "and after each step to mark progress. "
+                "Statuses: 'pending' | 'in_progress' | 'done'. "
+                "Only ONE task can be 'in_progress' at a time. "
+                "Always keep the list current so you and the user stay in sync."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "items": {
+                        "type": "array",
+                        "description": "Complete replacement task list.",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "id":     {"type": "string", "description": "Unique short identifier, e.g. '1', '2a'."},
+                                "text":   {"type": "string", "description": "Task description."},
+                                "status": {"type": "string", "enum": ["pending", "in_progress", "done"]}
+                            },
+                            "required": ["id", "text", "status"]
+                        }
+                    }
+                },
+                "required": ["items"]
+            }
+        }
+    },
+
+    # ── File I/O ─────────────────────────────────────────────────────────────
+    {
+        "type": "function",
+        "function": {
+            "name": "get_file_info",
+            "description": (
+                "Get metadata about a file: size, total line count, encoding, and last modified time. "
+                "Use this BEFORE read_file on large files to know how many lines there are, "
+                "then use start_line/end_line to read only what you need."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "Absolute or relative path to the file."}
+                },
+                "required": ["path"]
+            }
+        }
+    },
     {
         "type": "function",
         "function": {
             "name": "read_file",
             "description": (
                 "Reads the text content of a file. "
-                "Automatically truncates if > 30,000 chars; refuses files > 100 KB."
+                "For large files (>100 KB), use get_file_info first, then read with start_line/end_line. "
+                "Line numbers are 1-indexed and inclusive."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "path": {"type": "string", "description": "Absolute or relative path to the file."}
+                    "path":       {"type": "string", "description": "Absolute or relative path to the file."},
+                    "start_line": {"type": "integer", "description": "First line to read (1-indexed). Optional."},
+                    "end_line":   {"type": "integer", "description": "Last line to read (1-indexed, inclusive). Optional."}
                 },
                 "required": ["path"]
             }
@@ -412,7 +814,7 @@ TOOLS_SCHEMA = [
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "path": {"type": "string", "description": "File path to write to."},
+                    "path":    {"type": "string", "description": "File path to write to."},
                     "content": {"type": "string", "description": "Full file content to write."}
                 },
                 "required": ["path", "content"]
@@ -430,7 +832,7 @@ TOOLS_SCHEMA = [
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "path": {"type": "string", "description": "File path to append to."},
+                    "path":    {"type": "string", "description": "File path to append to."},
                     "content": {"type": "string", "description": "Text to append."}
                 },
                 "required": ["path", "content"]
@@ -450,14 +852,16 @@ TOOLS_SCHEMA = [
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "path": {"type": "string"},
-                    "target": {"type": "string", "description": "Exact text to find and replace."},
+                    "path":        {"type": "string"},
+                    "target":      {"type": "string", "description": "Exact text to find and replace."},
                     "replacement": {"type": "string", "description": "New text to substitute in."}
                 },
                 "required": ["path", "target", "replacement"]
             }
         }
     },
+
+    # ── Directory / Search ───────────────────────────────────────────────────
     {
         "type": "function",
         "function": {
@@ -487,7 +891,7 @@ TOOLS_SCHEMA = [
                 "type": "object",
                 "properties": {
                     "directory": {"type": "string", "description": "Root directory to search in."},
-                    "pattern": {"type": "string", "description": "Glob filename pattern, e.g. '*.json'."}
+                    "pattern":   {"type": "string", "description": "Glob filename pattern, e.g. '*.json'."}
                 },
                 "required": ["directory", "pattern"]
             }
@@ -506,7 +910,7 @@ TOOLS_SCHEMA = [
                 "type": "object",
                 "properties": {
                     "directory": {"type": "string", "description": "Root directory to search."},
-                    "query": {"type": "string", "description": "Text string to search for."},
+                    "query":     {"type": "string", "description": "Text string to search for."},
                     "extensions": {
                         "type": "array",
                         "items": {"type": "string"},
@@ -525,21 +929,20 @@ TOOLS_SCHEMA = [
         "function": {
             "name": "get_cwd",
             "description": "Returns the current working directory of the agent process.",
-            "parameters": {
-                "type": "object",
-                "properties": {},
-                "required": []
-            }
+            "parameters": {"type": "object", "properties": {}, "required": []}
         }
     },
+
+    # ── Shell ────────────────────────────────────────────────────────────────
     {
         "type": "function",
         "function": {
             "name": "run_command",
             "description": (
-                "Run a shell command and capture stdout/stderr. "
+                "Run a shell command synchronously and capture stdout/stderr. "
                 "Dangerous commands (rm -rf, format, del /f /s, etc.) are blocked. "
-                "Default timeout is 60 seconds."
+                "Default timeout is 60 seconds. "
+                "For long-running commands (installs, builds, tests), use run_background instead."
             ),
             "parameters": {
                 "type": "object",
@@ -557,6 +960,50 @@ TOOLS_SCHEMA = [
     {
         "type": "function",
         "function": {
+            "name": "run_background",
+            "description": (
+                "Run a shell command ASYNCHRONOUSLY in the background. Returns immediately with a task_id. "
+                "Ideal for long-running operations (npm install, pytest, docker build, etc.) "
+                "so the agent can continue working. "
+                "You will be automatically notified when the task completes. "
+                "Use check_background(task_id) to poll status manually."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "command": {"type": "string", "description": "Shell command to run in the background."},
+                    "timeout": {
+                        "type": "integer",
+                        "description": "Max seconds before killing the process. Default 300."
+                    }
+                },
+                "required": ["command"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "check_background",
+            "description": (
+                "Check the status and output of a background task by its task_id. "
+                "Use 'all' as task_id to list all background tasks."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "task_id": {
+                        "type": "string",
+                        "description": "Task ID returned by run_background, or 'all' to list all tasks."
+                    }
+                },
+                "required": ["task_id"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "change_dir",
             "description": "Change the current working directory for subsequent commands.",
             "parameters": {
@@ -568,6 +1015,8 @@ TOOLS_SCHEMA = [
             }
         }
     },
+
+    # ── Skills ───────────────────────────────────────────────────────────────
     {
         "type": "function",
         "function": {
@@ -580,23 +1029,42 @@ TOOLS_SCHEMA = [
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "name": {
-                        "type": "string",
-                        "description": "Short descriptive name, e.g. 'Deploy Frontend'."
-                    },
-                    "description": {
-                        "type": "string",
-                        "description": "Brief explanation of when to use this skill."
-                    },
-                    "instructions": {
-                        "type": "string",
-                        "description": "Detailed Markdown step-by-step instructions and code snippets."
-                    }
+                    "name":         {"type": "string", "description": "Short descriptive name, e.g. 'Deploy Frontend'."},
+                    "description":  {"type": "string", "description": "Brief explanation of when to use this skill."},
+                    "instructions": {"type": "string", "description": "Detailed Markdown step-by-step instructions."}
                 },
                 "required": ["name", "description", "instructions"]
             }
         }
-    }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_skills",
+            "description": "List all saved skills with their filenames, names, and descriptions.",
+            "parameters": {"type": "object", "properties": {}, "required": []}
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "delete_skill",
+            "description": (
+                "Delete a saved skill by filename (without .md) or display name. "
+                "Use list_skills first to see available skill names."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {
+                        "type": "string",
+                        "description": "Skill filename (e.g. 'deploy_frontend') or substring to match."
+                    }
+                },
+                "required": ["name"]
+            }
+        }
+    },
 ]
 
 
@@ -605,19 +1073,30 @@ TOOLS_SCHEMA = [
 # ---------------------------------------------------------------------------
 
 def execute_tool(name: str, kwargs: dict) -> str:
-    """Dispatch a tool call by name with provided keyword arguments."""
+    """Route a tool call by name. Unknown names and bad args both return error strings."""
     dispatch = {
-        "read_file": read_file,
-        "write_file": write_file,
-        "append_to_file": append_to_file,
-        "replace_in_file": replace_in_file,
-        "list_dir": list_dir,
-        "find_files": find_files,
-        "search_files": search_files,
-        "get_cwd": get_cwd,
-        "run_command": run_command,
-        "change_dir": change_dir,
-        "create_skill": create_skill,
+        # Todo
+        "todo_write":       todo_write,
+        # File I/O
+        "get_file_info":    get_file_info,
+        "read_file":        read_file,
+        "write_file":       write_file,
+        "append_to_file":   append_to_file,
+        "replace_in_file":  replace_in_file,
+        # Directory / Search
+        "list_dir":         list_dir,
+        "find_files":       find_files,
+        "search_files":     search_files,
+        "get_cwd":          get_cwd,
+        # Shell
+        "run_command":      run_command,
+        "run_background":   run_background,
+        "check_background": check_background,
+        "change_dir":       change_dir,
+        # Skills
+        "create_skill":     create_skill,
+        "list_skills":      list_skills,
+        "delete_skill":     delete_skill,
     }
 
     if name not in dispatch:

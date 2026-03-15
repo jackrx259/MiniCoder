@@ -1,15 +1,35 @@
 import os
 import json
 import sys
+import time
 from llm_client import LLMClient
-from tools import TOOLS_SCHEMA, execute_tool
+from tools import TOOLS_SCHEMA, execute_tool, TODO_MANAGER, BG_MANAGER
 from tui import TUI
 
 # Tools that only read/query data — safe to auto-approve without prompting
 _READ_ONLY_TOOLS = {
     "read_file", "list_dir", "get_cwd", "find_files", "search_files",
-    "get_file_info",
+    "get_file_info", "todo_write", "list_skills", "check_background",
 }
+
+# Tools that require special post-call handling
+_SKILL_WRITE_TOOLS = {"create_skill", "delete_skill"}
+
+# Approximate chars-per-token ratio (conservative estimate)
+_CHARS_PER_TOKEN = 4
+
+
+def _estimate_tokens(messages: list) -> int:
+    """Rough token estimate: total chars / 4."""
+    total = 0
+    for m in messages:
+        total += len(str(m.get("content") or ""))
+        total += len(str(m.get("role") or ""))
+        if m.get("tool_calls"):
+            total += len(json.dumps(m["tool_calls"]))
+        if m.get("tool_call_id"):
+            total += len(m["tool_call_id"])
+    return total // _CHARS_PER_TOKEN
 
 
 class Agent:
@@ -21,36 +41,22 @@ class Agent:
             timeout=config.get("timeout", 60),
             max_retries=config.get("max_retries", 3),
         )
-
-        # TUI rendering layer (falls back to plain print if None)
         self.tui = tui or TUI()
-
-        # Limits (overridable via config or CLI)
         self.max_loops = config.get("max_loops", 20)
-
-        # Context size limit in characters
-        self.max_context_chars = config.get("max_context_chars", 40000)
-
-        # Approval mode: 'ask' (default) or 'auto' (never ask)
+        self.max_context_tokens = config.get("max_context_tokens", 50000)
         self.approval_mode = config.get("approval_mode", "ask")
-
-        # Skills injection (can be disabled via --no-skills flag)
         self.load_skills = config.get("load_skills", True)
-
-        # Build the base system prompt (injected once; refreshed after skill creation)
         self.base_system_prompt = self._build_base_prompt(config)
-
-        # Conversation history (starts with system message)
         self.messages = [
             {"role": "system", "content": self._build_dynamic_system_prompt()}
         ]
-
-        # Per-session tool-call counter (reset on each new user message)
         self.loop_count = 0
+        self.rounds_since_todo = 0
+        self._transcripts_dir = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), ".transcripts"
+        )
 
-    # ──────────────────────────────────────────────────────────────────────
-    # System Prompt Builders
-    # ──────────────────────────────────────────────────────────────────────
+    # ── System Prompt ─────────────────────────────────────────────────────
 
     def _build_base_prompt(self, config: dict) -> str:
         user_prompt = config.get(
@@ -60,40 +66,42 @@ class Agent:
         return user_prompt + """
 You are MiniCoder, an advanced Agentic CLI programming assistant running locally.
 You have the following special capabilities and constraints:
+
 1. EXPLORATION: Use `search_files` to find classes/functions, `find_files` to locate files by pattern, and `list_dir` to explore before rewriting code.
-2. EDITING: Do NOT rewrite an entire file if you only need to change a few lines. Use `replace_in_file` for precision edits. Ensure your `target` text exactly matches the existing file content (including spaces and newlines) and is unique. If you must rewrite a small file entirely, use `write_file`.
-3. APPENDING: Use `append_to_file` to add content to a file without reading it first (efficient for logs or additive changes).
-4. NAVIGATION: Use `get_cwd` to know your current directory, `change_dir` to move between directories. Use `find_files` with glob patterns (e.g. '*.json') to locate files quickly.
-5. SKILLS: You can use `create_skill` to save reusable markdown workflows for the future. Check your injected skills before starting a task.
-6. SAFETY: You cannot run dangerous commands like `rm -rf`, `del /f /s`, `format`, etc.
-7. CONTEXT LIMITS: Do not read generated binaries or huge logs. `read_file` truncates at 30K chars and refuses files > 100 KB.
+2. EDITING: Do NOT rewrite an entire file if you only need to change a few lines. Use `replace_in_file` for precision edits. Ensure your `target` text exactly matches the existing file content (including spaces and newlines) and is unique.
+3. APPENDING: Use `append_to_file` to add content to a file without reading it first.
+4. NAVIGATION: Use `get_cwd` to know your current directory, `change_dir` to move between directories.
+5. LARGE FILES: Use `get_file_info` FIRST to check a file's line count, then `read_file` with `start_line`/`end_line` to read specific sections. Never blindly read a large file.
+6. SKILLS: Use `create_skill` to save reusable workflows, `list_skills` to view them, `delete_skill` to remove outdated ones. Check injected skills before starting a task.
+7. SAFETY: You cannot run dangerous commands like `rm -rf`, `del /f /s`, `format`, etc.
 8. AUTONOMY: Think step by step. If a command fails or a search returns no result, fix your parameters and try again. If you fail 3 times on the same thing, ask the user for help.
+9. BACKGROUND TASKS: For long-running operations (npm install, pytest, docker build), use `run_background` instead of `run_command`. You'll be automatically notified when they finish. Use `check_background(task_id)` to poll status.
+10. SUBAGENT: For complex research sub-tasks that need many tool calls (e.g., "analyse the entire codebase"), use `dispatch_task` to delegate to a sub-agent. It returns only a text summary, keeping your context clean.
 
-== PLANNING RULE (IMPORTANT) ==
-For complex tasks that involve multiple file modifications, you MUST:
+== TASK TRACKING RULE (CRITICAL) ==
+For ANY task with 3 or more steps, you MUST use `todo_write` to:
+  a) BEFORE starting: create the full task list (all steps as 'pending').
+  b) WHEN starting a step: mark it 'in_progress' (only ONE at a time).
+  c) AFTER completing a step: mark it 'done' before moving to the next.
+  d) AT THE END: ensure all tasks are marked 'done'.
+
+== PLANNING RULE ==
+For complex tasks involving multiple file modifications:
   a) First output a clear TEXT PLAN describing what you are about to do and why.
-  b) The plan should list the steps clearly, e.g. "Step 1: ..., Step 2: ..."
-  c) Do NOT include any tool calls in the same response as the plan.
-  d) Wait for user confirmation before proceeding with tool calls.
-
-For simple tasks (single file read, quick question, one-step operation), you may proceed directly.
-
-Read-only operations (list_dir, read_file, find_files, search_files, get_cwd) may be executed immediately without a prior text plan.
+  b) Wait for user confirmation before proceeding with tool calls.
+For simple tasks (single file read, quick question, one-step operation), proceed directly.
+Read-only operations may be executed immediately without a prior text plan.
 """
 
     def _get_available_skills(self) -> str:
-        """Scan the skills directory and inject skill summaries into the prompt."""
         if not self.load_skills:
             return "Skills loading disabled."
-
         skills_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "skills")
         if not os.path.exists(skills_dir):
             return "No custom skills learned yet."
-
         md_files = [f for f in os.listdir(skills_dir) if f.endswith(".md")]
         if not md_files:
             return "No custom skills learned yet."
-
         skills_text = []
         total_chars = 0
         for filename in sorted(md_files):
@@ -101,12 +109,10 @@ Read-only operations (list_dir, read_file, find_files, search_files, get_cwd) ma
             try:
                 with open(filepath, 'r', encoding='utf-8') as f:
                     content = f.read()
-                # If total skills content is small, inject fully; otherwise summary only
                 if total_chars + len(content) < 3000:
                     skills_text.append(f"--- SKILL: {filename} ---\n{content}\n")
                     total_chars += len(content)
                 else:
-                    # Extract just name + description from frontmatter
                     lines = content.splitlines()
                     summary_lines = [l for l in lines[:6] if l.strip() and not l.startswith('---')]
                     summary = " | ".join(summary_lines[:2])
@@ -116,108 +122,229 @@ Read-only operations (list_dir, read_file, find_files, search_files, get_cwd) ma
                     )
             except Exception:
                 pass
-
         if not skills_text:
             return "No custom skills learned yet."
-
         return "You have the following SKILLS/WORKFLOWS memorized:\n" + "\n".join(skills_text)
 
     def _build_dynamic_system_prompt(self) -> str:
-        """Combines base instructions with dynamically loaded skills."""
         skills_section = self._get_available_skills()
         return f"{self.base_system_prompt}\n\n=== YOUR SKILLS ===\n{skills_section}"
 
     def _refresh_system_prompt(self):
-        """Called to update the system prompt in case a new skill was created."""
         if self.messages and self.messages[0].get("role") == "system":
             self.messages[0]["content"] = self._build_dynamic_system_prompt()
 
-    # ──────────────────────────────────────────────────────────────────────
-    # Message Management
-    # ──────────────────────────────────────────────────────────────────────
+    # ── Message Management ────────────────────────────────────────────────
 
     def add_user_message(self, text: str):
-        """Add a user message and refresh context."""
         self._refresh_system_prompt()
         self.messages.append({"role": "user", "content": text})
-        self.loop_count = 0  # Reset per-turn loop counter
+        self.loop_count = 0
+        self.rounds_since_todo = 0
 
-    def _prune_context(self):
-        """
-        Prune old messages to keep the context window manageable.
+    # ── Three-Layer Context Compression ──────────────────────────────────
 
-        Strategy: Always keep the system prompt (index 0) and the last N
-        messages. In the prunable zone, remove tool-call PAIRS atomically
-        (assistant message with tool_calls + all its corresponding tool results)
-        to avoid sending orphaned tool messages to the API.
-        """
-
-        def _measure() -> int:
-            total = 0
-            for m in self.messages:
-                total += len(str(m.get("content") or ""))
-                total += len(str(m.get("role") or ""))
-                total += len(str(m.get("name") or ""))
-                total += len(str(m.get("tool_call_id") or ""))
-                if m.get("tool_calls"):
-                    total += len(json.dumps(m["tool_calls"]))
-            return total
-
-        if _measure() <= self.max_context_chars:
+    def _micro_compact(self):
+        """Layer 1: replace old tool results with placeholders (silent, every turn)."""
+        KEEP_RECENT = 6
+        tool_result_indices = [
+            i for i, m in enumerate(self.messages)
+            if m.get("role") == "tool"
+        ]
+        if len(tool_result_indices) <= KEEP_RECENT:
             return
+        to_compact = tool_result_indices[:-KEEP_RECENT]
+        for idx in to_compact:
+            msg = self.messages[idx]
+            content = msg.get("content", "")
+            tool_name = msg.get("name", "tool")
+            if isinstance(content, str) and len(content) > 80 and not content.startswith("[used "):
+                msg["content"] = f"[used {tool_name}]"
 
-        self.tui.print_context_pruning_start(self.max_context_chars)
+    def _save_transcript(self) -> str:
+        """Save full conversation JSONL to .transcripts/ for recovery."""
+        os.makedirs(self._transcripts_dir, exist_ok=True)
+        ts = int(time.time())
+        path = os.path.join(self._transcripts_dir, f"transcript_{ts}.jsonl")
+        try:
+            with open(path, 'w', encoding='utf-8') as f:
+                for msg in self.messages:
+                    f.write(json.dumps(msg, ensure_ascii=False, default=str) + "\n")
+            return path
+        except Exception as e:
+            return f"(transcript save failed: {e})"
 
-        # Keep system prompt + last 12 messages as an inviolable tail
-        TAIL = 12
+    def _do_compact(self) -> str:
+        """
+        Perform full compaction: save transcript, generate LLM summary,
+        replace messages with [system, compressed_summary, ack].
+        Returns the summary text.
+        """
+        self.tui.print_info("🗜️  Compressing conversation context…")
+        transcript_path = self._save_transcript()
+        self.tui.print_info(f"   Transcript saved → {transcript_path}")
+
+        # Use the last 60 messages as source material for the summary
+        recent = self.messages[-60:]
+        try:
+            summary_prompt = (
+                "You are summarizing an AI coding assistant conversation to free up context space.\n"
+                "Summarize the following conversation concisely. Include:\n"
+                "- The user's overall goal\n"
+                "- Key decisions made\n"
+                "- Files created/modified (with paths)\n"
+                "- Current todo/task state if applicable\n"
+                "- What still needs to be done\n"
+                "Be factual and brief.\n\n"
+                "CONVERSATION:\n"
+                + json.dumps(recent, ensure_ascii=False, default=str)[:80000]
+            )
+            resp = self.client.chat_completion(
+                [{"role": "user", "content": summary_prompt}]
+            )
+            summary_text = (
+                resp.get("choices", [{}])[0]
+                .get("message", {})
+                .get("content", "(summary unavailable)")
+            )
+        except Exception as e:
+            summary_text = f"(summary generation failed: {e})"
+
         system_msg = self.messages[0]
-        tail = self.messages[-TAIL:] if len(self.messages) > TAIL else []
-        tail_ids = {id(m) for m in tail}
+        self.messages = [
+            system_msg,
+            {
+                "role": "user",
+                "content": (
+                    f"<compressed_context>\n{summary_text}\n</compressed_context>\n\n"
+                    "The conversation has been compressed to save space. Continue from this point."
+                ),
+            },
+            {
+                "role": "assistant",
+                "content": "Understood. I have the compressed context and will continue from where we left off.",
+            },
+        ]
+        self.tui.print_success("✅ Context compressed successfully.")
+        return summary_text
 
-        # Build prunable segment: everything between system and tail
-        prunable = self.messages[1: len(self.messages) - len(tail)]
+    def _compress_context(self, force: bool = False) -> bool:
+        """Run micro-compact every turn; trigger full auto-compact if we're over budget.
+        Returns True if the heavy compaction actually fired."""
+        self._micro_compact()
+        token_est = _estimate_tokens(self.messages)
+        if force or token_est > self.max_context_tokens:
+            self._do_compact()
+            return True
+        return False
 
-        # Identify tool-call pair start indices in the prunable segment
-        i = 0
-        new_prunable = []
-        while i < len(prunable):
-            msg = prunable[i]
-            if msg.get("role") == "assistant" and msg.get("tool_calls"):
-                # Find all tool results for this batch
-                call_ids = {tc["id"] for tc in msg["tool_calls"]}
-                j = i + 1
-                pair = [msg]
-                while j < len(prunable) and prunable[j].get("role") == "tool":
-                    if prunable[j].get("tool_call_id") in call_ids:
-                        pair.append(prunable[j])
-                        j += 1
-                    else:
-                        break
-                # Skip (prune) this pair
-                i = j
-            else:
-                new_prunable.append(msg)
-                i += 1
+    # ── Background Task Notifications ─────────────────────────────────────
 
-        self.messages = [system_msg] + new_prunable + tail
+    def _drain_background_notifications(self):
+        """Pull finished background tasks off the queue and feed them into the
+        conversation as a user/assistant pair before the next LLM call."""
+        notifs = BG_MANAGER.drain_notifications()
+        if not notifs:
+            return
+        lines = []
+        for n in notifs:
+            status = "✅" if n["exit_code"] == 0 else "❌"
+            lines.append(
+                f"{status} Background task [{n['task_id']}] finished "
+                f"(exit={n['exit_code']})\n"
+                f"   Command: {n['command']!r}\n"
+                f"   Output preview: {n['output_preview']}"
+            )
+        notif_text = "\n\n".join(lines)
+        self.messages.append({
+            "role": "user",
+            "content": f"<background_results>\n{notif_text}\n</background_results>",
+        })
+        self.messages.append({
+            "role": "assistant",
+            "content": "Noted. Background task results received.",
+        })
+        self.tui.print_info(f"📬 {len(notifs)} background task(s) completed.")
 
-        after = _measure()
-        self.tui.print_context_prune(self.max_context_chars, after)
+    # ── TodoWrite Nag Reminder ────────────────────────────────────────────
 
-    # ──────────────────────────────────────────────────────────────────────
-    # Plan Review (Human-in-the-Loop)
-    # ──────────────────────────────────────────────────────────────────────
+    def _maybe_inject_todo_reminder(self):
+        """Nudge the LLM to update its todo list if it's been ignoring it for 3+ rounds."""
+        NAG_THRESHOLD = 3
+        if self.rounds_since_todo < NAG_THRESHOLD:
+            return
+        if not TODO_MANAGER.has_items() or TODO_MANAGER.pending_count() == 0:
+            return
+        reminder = (
+            "<reminder>You have pending todo items. "
+            "Please call todo_write to update task statuses before continuing.</reminder>"
+        )
+        for msg in reversed(self.messages):
+            if msg.get("role") == "tool":
+                existing = msg.get("content", "")
+                if isinstance(existing, str) and "<reminder>" not in existing:
+                    msg["content"] = reminder + "\n" + existing
+                return
+        self.messages.append({"role": "user", "content": reminder})
+
+    # ── Subagent ──────────────────────────────────────────────────────────
+
+    def _run_subagent(self, prompt: str) -> str:
+        """Spin up a sub-agent with its own clean message list.
+        Only the final text summary comes back — keeps the main context lean."""
+        subagent_tools = [
+            t for t in TOOLS_SCHEMA
+            if t.get("function", {}).get("name") != "dispatch_task"
+        ]
+        sub_messages = [{"role": "user", "content": prompt}]
+        MAX_SUB_LOOPS = 30
+
+        self.tui.print_info(f"🤖 Subagent spawned: {prompt[:80]}…")
+
+        for _ in range(MAX_SUB_LOOPS):
+            try:
+                response = self.client.chat_completion(sub_messages, tools=subagent_tools)
+            except Exception as e:
+                return f"Subagent LLM error: {e}"
+
+            choice = response.get("choices", [{}])[0].get("message", {})
+            sub_msg = {
+                k: v for k, v in choice.items()
+                if k in ("role", "content", "tool_calls") and v is not None
+            }
+            sub_msg.setdefault("role", "assistant")
+            sub_messages.append(sub_msg)
+
+            if not choice.get("tool_calls"):
+                result = choice.get("content", "(no summary)")
+                self.tui.print_info(f"🤖 Subagent done. Preview: {result[:100]}…")
+                return result
+
+            # Execute sub-agent tools silently (no approval)
+            for tc in choice["tool_calls"]:
+                func = tc["function"]
+                name = func["name"]
+                try:
+                    args = json.loads(func.get("arguments", "{}"))
+                except Exception:
+                    args = {}
+                result_str = execute_tool(name, args)
+                sub_messages.append({
+                    "role": "tool",
+                    "tool_call_id": tc["id"],
+                    "name": name,
+                    "content": result_str[:50000],
+                })
+
+        return "(Subagent reached max loop limit without producing a final response.)"
+
+    # ── Plan Review (Human-in-the-Loop) ──────────────────────────────────
 
     def _review_plan(self, tool_calls: list) -> tuple:
         """
-        Show ALL planned tool calls and ask the user for approval
-        via an arrow-key selection menu.
-
-        - If ALL calls are read-only they are silently auto-approved.
-        - Otherwise show the plan panel and selection menu.
-
-        Returns:
-            (approved_tool_calls: list, feedback: str | None)
+        Show the planned tool calls and wait for the user's decision.
+        Read-only-only batches are silently approved — no UI shown.
+        Returns the approved subset and any feedback text the user typed.
         """
         if self.approval_mode in ("auto", "yolo"):
             return tool_calls, None
@@ -226,28 +353,18 @@ Read-only operations (list_dir, read_file, find_files, search_files, get_cwd) ma
         if all(tc.get("function", {}).get("name") in _READ_ONLY_TOOLS for tc in tool_calls):
             return tool_calls, None
 
-        # Show the plan panel in the TUI (now with selection menu)
         self.tui.print_plan(tool_calls)
-
-        # Wait for the user's response via the selection menu
         answer = self.tui.prompt_plan_input()
 
-        # Always auto
         if answer.lower() == 'a':
             self.tui.print_success("已切换为全程自动模式，后续操作不再询问。")
             self.approval_mode = "auto"
             return tool_calls, None
-
-        # Deny all
         elif answer.lower() == 'n':
             self.tui.print_warn("操作已拒绝。")
             return [], None
-
-        # Approve all (empty / y)
         elif answer == '' or answer.lower() == 'y':
             return tool_calls, None
-
-        # Select specific steps: "1" or "1,3"
         elif all(c in '0123456789, ' for c in answer) and any(c.isdigit() for c in answer):
             indices = []
             for part in answer.replace(' ', '').split(','):
@@ -261,25 +378,22 @@ Read-only operations (list_dir, read_file, find_files, search_files, get_cwd) ma
                 chosen = [tool_calls[i] for i in sorted(set(indices))]
                 self.tui.print_success(f"执行步骤: {[i + 1 for i in sorted(set(indices))]}")
                 return chosen, None
-            # Invalid numbers treated as feedback
-            self.tui.print_info("已收到修改意见，重新规划中…")
+            # All entered numbers were out of range — warn and treat as feedback
+            self.tui.print_warn(
+                f"步骤编号超出范围（共 {len(tool_calls)} 步）。将作为修改意见处理。"
+            )
             return [], answer
-
-        # Free-text feedback → re-plan
         else:
             self.tui.print_info("已收到修改意见，重新规划中…")
             return [], answer
 
-    # ──────────────────────────────────────────────────────────────────────
-    # Plan Text Confirmation (for when LLM outputs a text plan)
-    # ──────────────────────────────────────────────────────────────────────
+    # ── Plan Text Confirmation ────────────────────────────────────────────
 
     def _is_plan_text(self, text: str) -> bool:
         """Heuristic: check if LLM output looks like a plan that needs confirmation."""
         if not text:
             return False
         text_lower = text.lower()
-        # Check for plan-like markers
         plan_markers = [
             "计划", "步骤", "plan", "step 1", "step 2",
             "首先", "然后", "接下来", "最后",
@@ -289,79 +403,98 @@ Read-only operations (list_dir, read_file, find_files, search_files, get_cwd) ma
             "方案", "修改方案",
         ]
         marker_count = sum(1 for m in plan_markers if m in text_lower)
-        # Also check for action verbs suggesting file modifications
         action_markers = [
             "创建", "修改", "删除", "写入", "添加", "替换",
             "create", "modify", "delete", "write", "add", "replace",
             "update", "edit", "remove", "change",
         ]
         action_count = sum(1 for m in action_markers if m in text_lower)
-        # Consider it a plan if it has enough markers
         return marker_count >= 2 or (marker_count >= 1 and action_count >= 1)
 
     def _handle_plan_confirmation(self, plan_text: str) -> str | None:
         """
         After LLM outputs a plan text, show it and let user choose to
         continue, reject, or modify.
-
-        Returns:
-            - None: continue executing (inject "请按计划执行")
-            - "reject": user rejected
-            - str: user's modification feedback
+        Returns: None (continue) | 'reject' | str (feedback)
         """
         if self.approval_mode in ("auto", "yolo"):
-            return None  # auto-continue
-
+            return None
         answer = self.tui.prompt_plan_confirmation(plan_text)
-
         if answer == "continue":
-            return None  # continue
+            return None
         elif answer == "reject":
             return "reject"
         else:
-            # Custom text / modification feedback
             return answer
 
-    # ──────────────────────────────────────────────────────────────────────
-    # Core Agent Loop (Iterative — no recursion)
-    # ──────────────────────────────────────────────────────────────────────
+    # ── Core Agent Loop ───────────────────────────────────────────────────
 
     def run_step(self) -> str | None:
         """
         Execute one full agent turn: call LLM → review plan → execute tools
         → repeat until the LLM returns a text response (no tool calls).
-
-        Uses an iterative loop instead of recursion to avoid stack overflows
-        on deep tool chains.
+        Iterative loop — no recursion.
         """
         self.loop_count = 0
 
         while True:
             if self.loop_count >= self.max_loops:
-                msg = (
+                return (
                     f"⚠️  Agent loop limit ({self.max_loops}) reached. "
                     "Please refine your request or increase max_loops in config.json."
                 )
-                return msg
 
-            self._prune_context()
+            # Layer 1 micro-compact + auto-compact check
+            self._compress_context()
+
+            # Drain background task notifications
+            self._drain_background_notifications()
+
+            # Inject todo nag reminder if needed
+            self._maybe_inject_todo_reminder()
+
             self.tui.print_separator_thinking()
             self.tui.print_thinking()
 
-            # ── LLM Call ─────────────────────────────────────────────────
+            # ── LLM Call ──────────────────────────────────────────────────
+
+            # dispatch_task needs a closure over self, so I append it per-call
+            effective_tools = TOOLS_SCHEMA + [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "dispatch_task",
+                        "description": (
+                            "Spawn a sub-agent with a fresh context to handle a complex research "
+                            "or multi-file analysis task. The sub-agent runs independently and "
+                            "returns only a text summary — keeping the main conversation lean. "
+                            "Use for tasks like: 'analyse the entire codebase', "
+                            "'find all usages of X across all files', etc."
+                        ),
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "prompt": {
+                                    "type": "string",
+                                    "description": "Detailed instructions for the sub-agent."
+                                }
+                            },
+                            "required": ["prompt"]
+                        }
+                    }
+                }
+            ]
+
             try:
-                response = self.client.chat_completion(self.messages, tools=TOOLS_SCHEMA)
+                response = self.client.chat_completion(self.messages, tools=effective_tools)
             except Exception as e:
                 self.tui.print_error(f"Error communicating with LLM: {e}")
                 return None
 
             choice = response.get("choices", [{}])[0].get("message", {})
-
-            # Print per-call token usage if available
             token_info = self.client.get_last_turn_tokens(response)
             self.tui.print_token_info(token_info)
 
-            # Build assistant message (only include non-None keys)
             assistant_msg = {
                 k: v for k, v in choice.items()
                 if k in ("role", "content", "tool_calls") and v is not None
@@ -373,48 +506,43 @@ Read-only operations (list_dir, read_file, find_files, search_files, get_cwd) ma
             if not choice.get("tool_calls"):
                 text = choice.get("content", "")
 
-                # Check if this looks like a plan that needs user confirmation
                 if self._is_plan_text(text):
-                    # Show the plan text first via Markdown rendering
                     self.tui.print_final_response(text)
-
-                    # Ask user what to do
                     result = self._handle_plan_confirmation(text)
 
                     if result is None:
-                        # User chose "continue" → inject approval and re-loop
                         self.messages.append({
                             "role": "user",
                             "content": "好的，请按照上述计划执行。"
                         })
                         self.loop_count += 1
+                        self.rounds_since_todo += 1
                         continue
                     elif result == "reject":
                         return "已拒绝计划。请输入新的指令。"
                     else:
-                        # User gave modification feedback
                         self.messages.append({
                             "role": "user",
                             "content": f"[用户修改意见]: {result}"
                         })
                         self.loop_count += 1
+                        self.rounds_since_todo += 1
                         continue
 
                 return text
 
-            # ── Tool calls requested ──────────────────────────────────────
+            # ── Tool calls requested ───────────────────────────────────────
             self.loop_count += 1
+            self.rounds_since_todo += 1
             all_tool_calls = choice["tool_calls"]
 
             approved_calls, feedback = self._review_plan(all_tool_calls)
 
             if feedback:
-                # User redirected the plan — inject feedback and re-loop
                 self.messages.append({
                     "role": "user",
                     "content": f"[User plan feedback]: {feedback}"
                 })
-                # Inject denial stubs for all original calls
                 for tc in all_tool_calls:
                     func_name = tc.get("function", {}).get("name") or "unknown"
                     self.messages.append({
@@ -425,7 +553,7 @@ Read-only operations (list_dir, read_file, find_files, search_files, get_cwd) ma
                     })
                 continue
 
-            # Inject denial stubs for non-approved calls
+            # Add stub result messages for denied calls to keep the history valid
             approved_ids = {tc["id"] for tc in approved_calls}
             for tc in all_tool_calls:
                 if tc["id"] not in approved_ids:
@@ -438,14 +566,13 @@ Read-only operations (list_dir, read_file, find_files, search_files, get_cwd) ma
                     })
 
             if not approved_calls:
-                # Entire plan denied — ask LLM to recover
                 self.messages.append({
                     "role": "user",
                     "content": "[All planned actions were denied. Please ask the user what they want to do instead.]"
                 })
                 continue
 
-            # ── Execute approved tool calls ───────────────────────────────
+            # ── Execute approved tool calls ────────────────────────────────
             self.tui.print_separator_executing(len(approved_calls))
 
             for tool_call in approved_calls:
@@ -456,23 +583,31 @@ Read-only operations (list_dir, read_file, find_files, search_files, get_cwd) ma
                 except Exception:
                     args = {}
 
-                # Concise args preview: hide large content values
                 preview_args = self._make_args_preview(name, args)
                 self.tui.print_tool_call(self.loop_count, self.max_loops, name, preview_args)
 
-                result_str = execute_tool(name, args)
+                # Handle dispatch_task specially (needs reference to self)
+                if name == "dispatch_task":
+                    result_str = self._run_subagent(args.get("prompt", ""))
+                else:
+                    result_str = execute_tool(name, args)
 
-                if name == "create_skill":
+                # Reset nag counter when todo_write is called
+                if name == "todo_write":
+                    self.rounds_since_todo = 0
+
+                # Refresh system prompt after skill changes
+                if name in _SKILL_WRITE_TOOLS:
                     self._refresh_system_prompt()
                     self.tui.print_skills_updated()
 
-                # Smart result display: read-only → summary; write/exec → preview
+                # One-liner summary for reads; truncated preview for writes/exec
                 if name in _READ_ONLY_TOOLS:
                     self.tui.print_tool_summary(name, result_str)
                 else:
                     preview_result = result_str
                     if len(preview_result) > 200:
-                        preview_result = preview_result[:200] + " ..."
+                        preview_result = preview_result[:200] + " …"
                     self.tui.print_tool_result(preview_result)
 
                 self.messages.append({
@@ -482,15 +617,13 @@ Read-only operations (list_dir, read_file, find_files, search_files, get_cwd) ma
                     "content": result_str
                 })
 
-            # Loop continues: send results back to LLM
-
     def _make_args_preview(self, name: str, args: dict) -> str:
-        """Create a concise args preview, hiding large content for write tools."""
+        """Build a short args preview for the tool-call log line, truncating
+        large 'content' fields so they don't flood the terminal."""
         preview_parts = {}
         for k, v in args.items():
             v_str = str(v)
-            # For write tools, truncate the content arg more aggressively
-            if k in ("content", "replacement", "instructions") and len(v_str) > 60:
+            if k in ("content", "replacement", "instructions", "prompt") and len(v_str) > 60:
                 v_str = v_str[:60] + "…"
             elif len(v_str) > 100:
                 v_str = v_str[:100] + "…"
@@ -501,25 +634,21 @@ Read-only operations (list_dir, read_file, find_files, search_files, get_cwd) ma
             result = result[:120] + "…}"
         return result
 
-    # ──────────────────────────────────────────────────────────────────────
-    # Session Persistence
-    # ──────────────────────────────────────────────────────────────────────
+    # ── Session Persistence ───────────────────────────────────────────────
 
     def _default_session_path(self) -> str:
         return os.path.join(os.path.dirname(os.path.abspath(__file__)), "session.json")
 
     def save_session(self, path: str = None) -> str:
-        """Serialize conversation history to a JSON file."""
         path = path or self._default_session_path()
         try:
             with open(path, 'w', encoding='utf-8') as f:
-                json.dump(self.messages, f, ensure_ascii=False, indent=2)
+                json.dump(self.messages, f, ensure_ascii=False, indent=2, default=str)
             return f"💾 Session saved to '{path}' ({len(self.messages)} messages)."
         except Exception as e:
             return f"Error saving session: {e}"
 
     def load_session(self, path: str = None) -> str:
-        """Restore conversation history from a JSON file."""
         path = path or self._default_session_path()
         if not os.path.exists(path):
             return f"No session file found at '{path}'."
@@ -528,21 +657,18 @@ Read-only operations (list_dir, read_file, find_files, search_files, get_cwd) ma
                 loaded = json.load(f)
             if not isinstance(loaded, list):
                 return "Error: Session file is malformed."
-            # Replace messages but keep current system prompt
             non_system = [m for m in loaded if m.get("role") != "system"]
             self.messages = [self.messages[0]] + non_system
             return f"📂 Session loaded from '{path}' ({len(self.messages)} messages restored)."
         except Exception as e:
             return f"Error loading session: {e}"
 
-    # ──────────────────────────────────────────────────────────────────────
-    # Interactive REPL
-    # ──────────────────────────────────────────────────────────────────────
+    # ── Interactive REPL ──────────────────────────────────────────────────
 
     def _handle_repl_command(self, cmd: str) -> bool:
         """
-        Handle built-in slash commands. Returns True if the input was
-        a command (so the caller should skip sending it to the LLM).
+        Handle built-in slash commands. Returns True if handled.
+        Returns '__EXIT__' string if user wants to exit.
         """
         parts = cmd.strip().split(None, 1)
         command = parts[0].lower()
@@ -556,10 +682,18 @@ Read-only operations (list_dir, read_file, find_files, search_files, get_cwd) ma
             return True
 
         elif command == "/clear":
-            # Keep system prompt, clear everything else
             self.messages = [self.messages[0]]
             self.loop_count = 0
+            self.rounds_since_todo = 0
             self.tui.print_success("Conversation cleared. System prompt preserved.")
+            return True
+
+        elif command == "/compact":
+            token_est = _estimate_tokens(self.messages)
+            self.tui.print_info(
+                f"Current context: ~{token_est:,} tokens. Running manual compaction…"
+            )
+            self._do_compact()
             return True
 
         elif command == "/history":
@@ -568,7 +702,11 @@ Read-only operations (list_dir, read_file, find_files, search_files, get_cwd) ma
             for r in roles:
                 role_counts[r] = role_counts.get(r, 0) + 1
             summary = ", ".join(f"{v}× {k}" for k, v in role_counts.items())
-            self.tui.print_info(f"History: {len(self.messages)} messages ({summary})")
+            token_est = _estimate_tokens(self.messages)
+            self.tui.print_info(
+                f"History: {len(self.messages)} messages ({summary}) | "
+                f"~{token_est:,} tokens estimated"
+            )
             return True
 
         elif command == "/save":
@@ -585,10 +723,18 @@ Read-only operations (list_dir, read_file, find_files, search_files, get_cwd) ma
             self.tui.print_info(self.client.get_usage_summary())
             return True
 
-        return False  # Not a built-in command
+        elif command == "/todo":
+            self.tui.print_info(TODO_MANAGER.render())
+            return True
+
+        elif command == "/bg":
+            self.tui.print_info(BG_MANAGER.list_all())
+            return True
+
+        return False
 
     def start_loop(self):
-        """Start the interactive REPL loop."""
+        """Run the main REPL — blocks until the user exits."""
         model_name = self.client.model
         mode_label = (
             "⚡ AUTO (no approval)" if self.approval_mode in ("auto", "yolo")
@@ -602,7 +748,7 @@ Read-only operations (list_dir, read_file, find_files, search_files, get_cwd) ma
 
         self.tui.welcome(model_name, mode_label, skill_count, self.max_loops)
 
-        # Offer to restore last session if one exists
+        # Offer to restore last session
         session_path = self._default_session_path()
         if os.path.exists(session_path):
             if self.tui.prompt_yes_no(f"Previous session found at '{session_path}'. Restore?"):
@@ -612,12 +758,10 @@ Read-only operations (list_dir, read_file, find_files, search_files, get_cwd) ma
             user_input = self.tui.prompt_user_message()
 
             if user_input is None:
-                # EOFError / KeyboardInterrupt in prompt
                 self.tui.print_goodbye()
                 break
 
             if user_input.lower() in ("exit", "quit"):
-                # Offer to save on exit
                 if self.tui.prompt_yes_no("Save session before exiting?"):
                     self.tui.print_info(self.save_session())
                 self.tui.print_goodbye()
@@ -626,7 +770,6 @@ Read-only operations (list_dir, read_file, find_files, search_files, get_cwd) ma
             if not user_input:
                 continue
 
-            # Handle built-in commands
             if user_input.startswith('/') or user_input.lower() in ("help",):
                 result = self._handle_repl_command(user_input)
                 if result == "__EXIT__":

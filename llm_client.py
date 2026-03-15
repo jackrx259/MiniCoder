@@ -15,7 +15,7 @@ class LLMClient:
                  timeout: int = 60, max_retries: int = 3):
         self.model = model
 
-        # Cumulative token usage tracking
+        # Running totals exposed by get_usage_summary() for the /usage command
         self._total_prompt_tokens = 0
         self._total_completion_tokens = 0
         self._total_requests = 0
@@ -25,7 +25,7 @@ class LLMClient:
         self._client = OpenAI(
             api_key=api_key,
             base_url=api_base,
-            # Accepts float or httpx.Timeout; using the latter for per-phase control.
+            # I use httpx.Timeout for per-phase granularity (connect vs read timeout)
             timeout=httpx.Timeout(timeout, read=timeout, write=30.0, connect=10.0),
             max_retries=max_retries,
         )
@@ -35,12 +35,11 @@ class LLMClient:
     # ------------------------------------------------------------------
 
     def chat_completion(self, messages: list, tools: list = None) -> dict:
-        """Send a chat completion request via the openai SDK.
+        """Send a chat completion request and return a plain response dict.
 
-        The SDK transparently handles retries (429 / 5xx) with exponential
-        back-off, so no manual retry loop is needed here.
-        Returns a plain dict mirroring the OpenAI response schema so that
-        the rest of the codebase needs no changes.
+        I let the SDK handle retries (429 / 5xx, exponential back-off) so there's
+        no manual retry loop here. I convert the Pydantic response to a plain dict
+        via to_dict() so callers don't need to import any SDK types.
         """
         kwargs = {
             "model": self.model,
@@ -79,9 +78,7 @@ class LLMClient:
             self._total_completion_tokens += usage.completion_tokens or 0
         self._total_requests += 1
 
-        # Convert the SDK Pydantic response model to a plain dict.
-        # to_dict() is the SDK-idiomatic method; it lets the rest of the
-        # codebase use standard dict access without depending on Pydantic.
+        # Convert Pydantic model → plain dict so callers don't depend on SDK internals
         return response.to_dict()
 
     # ------------------------------------------------------------------
@@ -89,7 +86,7 @@ class LLMClient:
     # ------------------------------------------------------------------
 
     def get_usage_summary(self) -> str:
-        """Return a human-readable token usage summary."""
+        """Format running token totals into a one-liner for the /usage command."""
         total = self._total_prompt_tokens + self._total_completion_tokens
         return (
             f"📊 Token Usage — "
@@ -100,7 +97,7 @@ class LLMClient:
         )
 
     def get_last_turn_tokens(self, response_data: dict) -> str:
-        """Return per-call token info from a response dict."""
+        """Pull per-call token counts from a response dict and format them for the status bar."""
         usage = response_data.get("usage") or {}
         p = usage.get("prompt_tokens", 0)
         c = usage.get("completion_tokens", 0)

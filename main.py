@@ -10,7 +10,7 @@ from tui import TUI
 
 
 def parse_cli_args():
-    """Parse command-line arguments, returning a Namespace."""
+    """Wire up argparse and return the parsed Namespace."""
     parser = argparse.ArgumentParser(
         description="MiniCoder — Agentic CLI Coding Assistant",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -61,8 +61,8 @@ def main():
     script_dir = os.path.dirname(os.path.abspath(__file__))
     config_file = args.config or os.path.join(script_dir, "config.json")
 
-    # ── Pre-flight config loading (before TUI starts) ─────────────────────────
-    # Use plain print() here — the TUI session has not started yet.
+    # ── Config loading (pre-TUI) ─────────────────────────────────────────────────
+    # I use plain print() here because the TUI session hasn't started yet.
     if not os.path.exists(config_file):
         print(f"[warn] Config file not found at: {config_file}")
         print("[info] Generating a default config…")
@@ -105,8 +105,8 @@ def main():
     if args.no_skills:
         config["load_skills"] = False
 
-    # ── Launch TUI and start agent loop ─────────────────────────────────────
-    # The TUI owns the main thread; agent.start_loop() is invoked inside it.
+    # ── Start ─────────────────────────────────────────────────────────────────
+    # I hand control to the TUI here; it owns the main thread for the rest of the session.
     tui = TUI()
     agent = Agent(config, tui=tui)
     tui.run(agent.start_loop)

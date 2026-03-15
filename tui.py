@@ -42,7 +42,7 @@ from rich.markdown import Markdown as RichMarkdown
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _rich_to_ansi(markup: str, width: int = 120) -> str:
-    """Render a Rich markup string to an ANSI escape-sequence string."""
+    """Run a Rich markup string through a string-buffer Console and return raw ANSI."""
     buf = io.StringIO()
     con = Console(file=buf, force_terminal=True, width=width, highlight=False, markup=True)
     con.print(markup, end="")
@@ -50,7 +50,7 @@ def _rich_to_ansi(markup: str, width: int = 120) -> str:
 
 
 def _rich_markdown_to_ansi(text: str, width: int = 100) -> str:
-    """Render a Markdown string to ANSI via Rich."""
+    """Same as _rich_to_ansi but renders Markdown first."""
     buf = io.StringIO()
     con = Console(file=buf, force_terminal=True, width=width, highlight=False)
     con.print(RichMarkdown(text), end="")
@@ -58,7 +58,7 @@ def _rich_markdown_to_ansi(text: str, width: int = 100) -> str:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Tool classification helpers (mirrors original tui.py)
+# Tool classification helpers
 # ─────────────────────────────────────────────────────────────────────────────
 
 _WRITE_TOOLS = {
@@ -213,7 +213,7 @@ class TUI:
     # ── Internal helpers ─────────────────────────────────────────────────────
 
     def _out(self, ansi: str) -> None:
-        """Print an ANSI string through the patch_stdout-aware channel."""
+        """Write raw ANSI to the patch_stdout-aware output channel."""
         print_formatted_text(ANSI(ansi), end="")
 
     def _log(self, markup: str) -> None:
@@ -234,7 +234,8 @@ class TUI:
     # ── Lifecycle ─────────────────────────────────────────────────────────────
 
     def run(self, agent_start_fn: Callable) -> None:
-        """Launch the agent synchronously wrapped in patch_stdout context."""
+        """Wrap the agent in a patch_stdout context and hand control to it.
+        Blocks until the agent's REPL exits."""
         session_style = Style.from_dict({
             # Prompt prefix
             "prompt":         "bold cyan",
@@ -334,7 +335,7 @@ class TUI:
     # ── Plan review ───────────────────────────────────────────────────────────
 
     def print_plan(self, tool_calls: list) -> None:
-        """Display the plan panel (all upcoming tool calls) before asking approval."""
+        """Render the upcoming tool calls as a numbered plan before asking for approval."""
         self._log(f"\n[bold white on dark_blue]  📋  执行计划 — 共 {len(tool_calls)} 步操作  [/]")
         for i, tc in enumerate(tool_calls, 1):
             func = tc.get("function", {})
@@ -441,10 +442,8 @@ class TUI:
             return None
 
     def prompt_plan_input(self) -> str:
-        """
-        Block waiting for plan-approval response (arrow-key selection menu).
-        Returns: 'y', 'n', 'a', or free-text feedback.
-        """
+        """Show the approval selection menu and return the user's choice.
+        Returns 'y', 'n', 'a', or free-text feedback."""
         value = _run_selection_menu(
             items=[
                 ("✅ 执行全部",                       "y"),
@@ -470,7 +469,7 @@ class TUI:
         return value.lower().startswith("y")
 
     def prompt_input(self, label: str = "  Your choice") -> str:
-        """Show a one-line text prompt with a custom label."""
+        """Convenience wrapper around prompt_text."""
         return self.prompt_text(label)
 
     def prompt_text(self, label: str) -> str:
