@@ -62,7 +62,7 @@ def main():
     config_file = args.config or os.path.join(script_dir, "config.json")
 
     # ── Config loading (pre-TUI) ─────────────────────────────────────────────────
-    # I use plain print() here because the TUI session hasn't started yet.
+    # use plain print() here because the TUI session hasn't started yet.
     if not os.path.exists(config_file):
         print(f"[warn] Config file not found at: {config_file}")
         print("[info] Generating a default config…")
@@ -106,7 +106,7 @@ def main():
         config["load_skills"] = False
 
     # ── Start ─────────────────────────────────────────────────────────────────
-    # I hand control to the TUI here; it owns the main thread for the rest of the session.
+    # hand control to the TUI here; it owns the main thread for the rest of the session.
     tui = TUI()
     agent = Agent(config, tui=tui)
     tui.run(agent.start_loop)
