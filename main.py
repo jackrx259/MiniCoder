@@ -3,7 +3,7 @@ import json
 import sys
 import argparse
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from agent import Agent
 from tui import TUI
