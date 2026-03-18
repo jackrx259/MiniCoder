@@ -188,16 +188,16 @@ Read-only operations may be executed immediately without a prior text plan.
         recent = self.messages[-60:]
         try:
             summary_prompt = (
-                "You are summarizing an AI coding assistant conversation to free up context space.\n"
-                "Summarize the following conversation concisely. Include:\n"
-                "- The user's overall goal\n"
-                "- Key decisions made\n"
-                "- Files created/modified (with paths)\n"
-                "- Current todo/task state if applicable\n"
-                "- What still needs to be done\n"
-                "Be factual and brief.\n\n"
-                "CONVERSATION:\n"
-                + json.dumps(recent, ensure_ascii=False, default=str)[:80000]
+                    "You are summarizing an AI coding assistant conversation to free up context space.\n"
+                    "Summarize the following conversation concisely. Include:\n"
+                    "- The user's overall goal\n"
+                    "- Key decisions made\n"
+                    "- Files created/modified (with paths)\n"
+                    "- Current todo/task state if applicable\n"
+                    "- What still needs to be done\n"
+                    "Be factual and brief.\n\n"
+                    "CONVERSATION:\n"
+                    + json.dumps(recent, ensure_ascii=False, default=str)[:80000]
             )
             resp = self.client.chat_completion(
                 [{"role": "user", "content": summary_prompt}]

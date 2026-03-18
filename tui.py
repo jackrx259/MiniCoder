@@ -37,6 +37,7 @@ from prompt_toolkit.styles import Style
 from rich.console import Console
 from rich.markdown import Markdown as RichMarkdown
 
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Rich → ANSI helpers
 # ─────────────────────────────────────────────────────────────────────────────
@@ -107,16 +108,16 @@ def _summarize_tool_result(name: str, result: str) -> str:
 
 # Style for the selection menu
 _MENU_STYLE = Style.from_dict({
-    "title":      "bold cyan",
-    "selected":   "bold white bg:#1f6feb",
+    "title": "bold cyan",
+    "selected": "bold white bg:#1f6feb",
     "unselected": "#8b949e",
-    "border":     "#388bfd",
+    "border": "#388bfd",
 })
 
 
 def _run_selection_menu(
-    items: List[Tuple[str, str]],
-    title: str = "",
+        items: List[Tuple[str, str]],
+        title: str = "",
 ) -> str:
     """
     Show a non-fullscreen arrow-key selection menu.
@@ -238,13 +239,13 @@ class TUI:
         Blocks until the agent's REPL exits."""
         session_style = Style.from_dict({
             # Prompt prefix
-            "prompt":         "bold cyan",
+            "prompt": "bold cyan",
             # Bottom toolbar
-            "toolbar":        "bg:#161b22 #8b949e",
-            "toolbar.model":  "bg:#161b22 bold #58a6ff",
-            "toolbar.mode":   "bg:#161b22 #e6edf3",
+            "toolbar": "bg:#161b22 #8b949e",
+            "toolbar.model": "bg:#161b22 bold #58a6ff",
+            "toolbar.mode": "bg:#161b22 #e6edf3",
             "toolbar.tokens": "bg:#161b22 #8b949e",
-            "toolbar.sep":    "bg:#161b22 #30363d",
+            "toolbar.sep": "bg:#161b22 #30363d",
         })
 
         self._session = PromptSession(
@@ -364,8 +365,8 @@ class TUI:
         value = _run_selection_menu(
             items=[
                 ("▶️  继续执行 (按计划进行)", "continue"),
-                ("❌ 拒绝 (停止执行)",       "reject"),
-                ("✏️  修改计划…",              "__custom__"),
+                ("❌ 拒绝 (停止执行)", "reject"),
+                ("✏️  修改计划…", "__custom__"),
             ],
             title="📋 已生成计划，请选择操作：",
         )
@@ -446,10 +447,10 @@ class TUI:
         Returns 'y', 'n', 'a', or free-text feedback."""
         value = _run_selection_menu(
             items=[
-                ("✅ 执行全部",                       "y"),
-                ("❌ 拒绝全部",                       "n"),
-                ("⚡ 全程自动 (后续不再询问)",         "a"),
-                ("💬 修改计划 / 自定义输入…",          "__custom__"),
+                ("✅ 执行全部", "y"),
+                ("❌ 拒绝全部", "n"),
+                ("⚡ 全程自动 (后续不再询问)", "a"),
+                ("💬 修改计划 / 自定义输入…", "__custom__"),
             ],
             title="📋 执行计划 — 请选择操作：",
         )
@@ -462,7 +463,7 @@ class TUI:
         value = _run_selection_menu(
             items=[
                 ("✅ 是 (Yes)", "y"),
-                ("❌ 否 (No)",  "n"),
+                ("❌ 否 (No)", "n"),
             ],
             title=question,
         )

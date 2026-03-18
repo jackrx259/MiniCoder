@@ -263,10 +263,10 @@ def read_file(path: str, start_line: int = None, end_line: int = None) -> str:
 
         if len(content) > 30000:
             return (
-                f"[Content truncated — full length {len(content):,} chars. "
-                f"Showing first 30,000 chars]\n"
-                + content[:30000]
-                + "\n...[TRUNCATED — use start_line/end_line for the rest]"
+                    f"[Content truncated — full length {len(content):,} chars. "
+                    f"Showing first 30,000 chars]\n"
+                    + content[:30000]
+                    + "\n...[TRUNCATED — use start_line/end_line for the rest]"
             )
         return content
     except Exception as e:
@@ -360,14 +360,14 @@ def replace_in_file(path: str, target: str, replacement: str) -> str:
             hint = ""
             if hint_lines:
                 hint = (
-                    "\n\nFuzzy-match hint — closest existing lines:\n"
-                    + "\n".join(f"  | {ln}" for ln in hint_lines)
-                    + "\n\nCheck exact whitespace, indentation, and newlines."
+                        "\n\nFuzzy-match hint — closest existing lines:\n"
+                        + "\n".join(f"  | {ln}" for ln in hint_lines)
+                        + "\n\nCheck exact whitespace, indentation, and newlines."
                 )
             return (
-                f"Error: Target text not found in '{path}'. "
-                f"Please ensure the 'target' matches the file exactly (spaces, tabs, newlines)."
-                + hint
+                    f"Error: Target text not found in '{path}'. "
+                    f"Please ensure the 'target' matches the file exactly (spaces, tabs, newlines)."
+                    + hint
             )
         elif occurrences > 1:
             return (
@@ -576,8 +576,8 @@ def run_command(command: str, timeout: int = 60) -> str:
 
         if len(output) > 10000:
             return (
-                f"[Output truncated — full length {len(output):,} chars. Showing last 10,000 chars]\n"
-                + output[-10000:]
+                    f"[Output truncated — full length {len(output):,} chars. Showing last 10,000 chars]\n"
+                    + output[-10000:]
             )
 
         return output.strip()
@@ -750,8 +750,8 @@ TOOLS_SCHEMA = [
                         "items": {
                             "type": "object",
                             "properties": {
-                                "id":     {"type": "string", "description": "Unique short identifier, e.g. '1', '2a'."},
-                                "text":   {"type": "string", "description": "Task description."},
+                                "id": {"type": "string", "description": "Unique short identifier, e.g. '1', '2a'."},
+                                "text": {"type": "string", "description": "Task description."},
                                 "status": {"type": "string", "enum": ["pending", "in_progress", "done"]}
                             },
                             "required": ["id", "text", "status"]
@@ -794,9 +794,10 @@ TOOLS_SCHEMA = [
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "path":       {"type": "string", "description": "Absolute or relative path to the file."},
+                    "path": {"type": "string", "description": "Absolute or relative path to the file."},
                     "start_line": {"type": "integer", "description": "First line to read (1-indexed). Optional."},
-                    "end_line":   {"type": "integer", "description": "Last line to read (1-indexed, inclusive). Optional."}
+                    "end_line": {"type": "integer",
+                                 "description": "Last line to read (1-indexed, inclusive). Optional."}
                 },
                 "required": ["path"]
             }
@@ -814,7 +815,7 @@ TOOLS_SCHEMA = [
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "path":    {"type": "string", "description": "File path to write to."},
+                    "path": {"type": "string", "description": "File path to write to."},
                     "content": {"type": "string", "description": "Full file content to write."}
                 },
                 "required": ["path", "content"]
@@ -832,7 +833,7 @@ TOOLS_SCHEMA = [
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "path":    {"type": "string", "description": "File path to append to."},
+                    "path": {"type": "string", "description": "File path to append to."},
                     "content": {"type": "string", "description": "Text to append."}
                 },
                 "required": ["path", "content"]
@@ -852,8 +853,8 @@ TOOLS_SCHEMA = [
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "path":        {"type": "string"},
-                    "target":      {"type": "string", "description": "Exact text to find and replace."},
+                    "path": {"type": "string"},
+                    "target": {"type": "string", "description": "Exact text to find and replace."},
                     "replacement": {"type": "string", "description": "New text to substitute in."}
                 },
                 "required": ["path", "target", "replacement"]
@@ -891,7 +892,7 @@ TOOLS_SCHEMA = [
                 "type": "object",
                 "properties": {
                     "directory": {"type": "string", "description": "Root directory to search in."},
-                    "pattern":   {"type": "string", "description": "Glob filename pattern, e.g. '*.json'."}
+                    "pattern": {"type": "string", "description": "Glob filename pattern, e.g. '*.json'."}
                 },
                 "required": ["directory", "pattern"]
             }
@@ -910,7 +911,7 @@ TOOLS_SCHEMA = [
                 "type": "object",
                 "properties": {
                     "directory": {"type": "string", "description": "Root directory to search."},
-                    "query":     {"type": "string", "description": "Text string to search for."},
+                    "query": {"type": "string", "description": "Text string to search for."},
                     "extensions": {
                         "type": "array",
                         "items": {"type": "string"},
@@ -1029,8 +1030,8 @@ TOOLS_SCHEMA = [
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "name":         {"type": "string", "description": "Short descriptive name, e.g. 'Deploy Frontend'."},
-                    "description":  {"type": "string", "description": "Brief explanation of when to use this skill."},
+                    "name": {"type": "string", "description": "Short descriptive name, e.g. 'Deploy Frontend'."},
+                    "description": {"type": "string", "description": "Brief explanation of when to use this skill."},
                     "instructions": {"type": "string", "description": "Detailed Markdown step-by-step instructions."}
                 },
                 "required": ["name", "description", "instructions"]
@@ -1076,27 +1077,27 @@ def execute_tool(name: str, kwargs: dict) -> str:
     """Route a tool call by name. Unknown names and bad args both return error strings."""
     dispatch = {
         # Todo
-        "todo_write":       todo_write,
+        "todo_write": todo_write,
         # File I/O
-        "get_file_info":    get_file_info,
-        "read_file":        read_file,
-        "write_file":       write_file,
-        "append_to_file":   append_to_file,
-        "replace_in_file":  replace_in_file,
+        "get_file_info": get_file_info,
+        "read_file": read_file,
+        "write_file": write_file,
+        "append_to_file": append_to_file,
+        "replace_in_file": replace_in_file,
         # Directory / Search
-        "list_dir":         list_dir,
-        "find_files":       find_files,
-        "search_files":     search_files,
-        "get_cwd":          get_cwd,
+        "list_dir": list_dir,
+        "find_files": find_files,
+        "search_files": search_files,
+        "get_cwd": get_cwd,
         # Shell
-        "run_command":      run_command,
-        "run_background":   run_background,
+        "run_command": run_command,
+        "run_background": run_background,
         "check_background": check_background,
-        "change_dir":       change_dir,
+        "change_dir": change_dir,
         # Skills
-        "create_skill":     create_skill,
-        "list_skills":      list_skills,
-        "delete_skill":     delete_skill,
+        "create_skill": create_skill,
+        "list_skills": list_skills,
+        "delete_skill": delete_skill,
     }
 
     if name not in dispatch:
