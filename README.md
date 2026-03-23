@@ -1,13 +1,25 @@
+**English** | [中文](README_zh.md)
+
 # MiniCoder
 
-> A lightweight, local-first agentic CLI coding assistant — works with any OpenAI-compatible LLM.
+> 🔬 Curious how agentic coding assistants like Claude Code / Cursor work? MiniCoder implements the same core ideas in pure Python — read the code, learn the patterns.
 
-I built MiniCoder because I wanted a coding agent that stays out of my way until I tell it to act. It runs in your terminal, can read/write files, search codebases, and execute shell commands — but it always shows you the plan first and waits for your approval before doing anything destructive. No surprises.
+MiniCoder is a lightweight, local-first agentic CLI coding assistant. It implements the core building blocks shared by tools like Claude Code — agent loop, tool calling, multi-step reasoning, human-in-the-loop approval, context management, and persistent memory — in a small, readable Python codebase that's easy to follow and modify.
+
+I built it because I wanted a coding agent that stays out of my way until I tell it to act. It runs in your terminal, can read/write files, search codebases, and execute shell commands — but it always shows you the plan first and waits for your approval before doing anything destructive. No surprises.
 
 No Electron. No cloud sync. No subscription. Just Python, your API key, and a REPL.
 
 [![Python](https://img.shields.io/badge/python-3.10%2B-blue)](https://www.python.org/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
+
+### 🎯 Why MiniCoder?
+
+If you want to understand how agentic coding assistants work, reading a compact implementation is the fastest way:
+
+- **Learn by reading** — Clean, well-structured Python. Each component (agent loop, tool dispatch, context compression, memory) corresponds to a real pattern used in Claude Code / Cursor / Windsurf.
+- **Learn by doing** — Swap models, add new tools, change approval logic, tweak the prompt — then see how behavior changes.
+- **Actually usable** — Handles real-world coding tasks with multi-step reasoning, background execution, and session persistence.
 
 ---
 
