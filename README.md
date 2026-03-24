@@ -13,6 +13,11 @@ No Electron. No cloud sync. No subscription. Just Python, your API key, and a RE
 [![Python](https://img.shields.io/badge/python-3.10%2B-blue)](https://www.python.org/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
+<p align="center">
+  <img src="assets/demo.webp" alt="MiniCoder Demo">
+</p>
+
+
 ### 🎯 Why MiniCoder?
 
 If you want to understand how agentic coding assistants work, reading a compact implementation is the fastest way:
