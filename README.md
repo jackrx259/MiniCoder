@@ -54,6 +54,11 @@ If you want to understand how agentic coding assistants work, reading a compact 
 - **Any OpenAI-compatible API** — OpenAI, Azure OpenAI, Google Gemini (via compatibility layer), local Ollama, DeepSeek, and others.
 - **prompt_toolkit TUI** — clean, keyboard-navigable terminal interface with syntax highlighting; no Textual or curses dependencies.
 
+### Browser Automation (`/claw`)
+- **Web agent mode** — type `/claw <task>` to enter browser agent mode. MiniCoder launches a Chromium browser and automates web interactions: navigate, click, type, screenshot, and more.
+- **Human-in-the-loop** — browser actions go through the same plan-approval flow as other tools. You see every step before it happens.
+- **Powered by Playwright** — reliable, headful browser automation with auto-waiting and smart selectors.
+
 ---
 
 ## 📦 Installation
@@ -64,6 +69,9 @@ cd MiniCoder
 
 # uv creates the virtual environment and installs deps in one step
 uv sync
+
+# Install Chromium for browser automation (optional, needed for /claw)
+playwright install chromium
 ```
 
 > Don't have `uv`? `pip install uv` or see [uv's docs](https://docs.astral.sh/uv/).
@@ -132,6 +140,7 @@ python main.py
 | `/save [file]` | Save session to JSON (default: `session.json`) |
 | `/load [file]` | Load session from JSON |
 | `/usage` | Show cumulative token usage |
+| `/claw <task>` | Enter browser agent mode — automate web tasks |
 | `exit` / `quit` | End the session (offers to save) |
 | `Ctrl+C` | Interrupt current agent action |
 | `Ctrl+D` | Quit immediately |
@@ -176,6 +185,18 @@ Pure read-only tool batches are approved silently and never shown as a plan.
 | `list_skills` | List all saved skills |
 | `delete_skill` | Remove an outdated skill |
 | `dispatch_task` | Spawn a sub-agent for large research tasks |
+| `browser_open` | Open browser and navigate to URL |
+| `browser_navigate` | Navigate to a new URL |
+| `browser_click` | Click an element (CSS selector or text) |
+| `browser_type` | Type text into an input field |
+| `browser_screenshot` | Take a screenshot of the page |
+| `browser_get_text` | Get visible text content |
+| `browser_get_elements` | List interactive elements on the page |
+| `browser_scroll` | Scroll the page up/down |
+| `browser_select` | Select a dropdown option |
+| `browser_wait` | Wait for an element to appear |
+| `browser_press_key` | Press a keyboard key |
+| `browser_close` | Close the browser |
 
 ---
 

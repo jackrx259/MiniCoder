@@ -1075,6 +1075,19 @@ TOOLS_SCHEMA = [
 
 def execute_tool(name: str, kwargs: dict) -> str:
     """Route a tool call by name. Unknown names and bad args both return error strings."""
+    from browser_tools import (
+        browser_open, browser_navigate, browser_click, browser_type,
+        browser_screenshot, browser_get_text, browser_get_elements,
+        browser_scroll, browser_select, browser_wait, browser_press_key,
+        browser_close,
+    )
+    from desktop_tools import (
+        desktop_open_app, desktop_screenshot, desktop_click,
+        desktop_double_click, desktop_type, desktop_hotkey,
+        desktop_press_key, desktop_move_mouse, desktop_scroll,
+        desktop_get_mouse_pos, desktop_get_screen_size, desktop_find_image,
+    )
+
     dispatch = {
         # Todo
         "todo_write": todo_write,
@@ -1098,6 +1111,32 @@ def execute_tool(name: str, kwargs: dict) -> str:
         "create_skill": create_skill,
         "list_skills": list_skills,
         "delete_skill": delete_skill,
+        # Browser
+        "browser_open": browser_open,
+        "browser_navigate": browser_navigate,
+        "browser_click": browser_click,
+        "browser_type": browser_type,
+        "browser_screenshot": browser_screenshot,
+        "browser_get_text": browser_get_text,
+        "browser_get_elements": browser_get_elements,
+        "browser_scroll": browser_scroll,
+        "browser_select": browser_select,
+        "browser_wait": browser_wait,
+        "browser_press_key": browser_press_key,
+        "browser_close": browser_close,
+        # Desktop
+        "desktop_open_app": desktop_open_app,
+        "desktop_screenshot": desktop_screenshot,
+        "desktop_click": desktop_click,
+        "desktop_double_click": desktop_double_click,
+        "desktop_type": desktop_type,
+        "desktop_hotkey": desktop_hotkey,
+        "desktop_press_key": desktop_press_key,
+        "desktop_move_mouse": desktop_move_mouse,
+        "desktop_scroll": desktop_scroll,
+        "desktop_get_mouse_pos": desktop_get_mouse_pos,
+        "desktop_get_screen_size": desktop_get_screen_size,
+        "desktop_find_image": desktop_find_image,
     }
 
     if name not in dispatch:

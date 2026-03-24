@@ -4,12 +4,17 @@ import sys
 import time
 from llm_client import LLMClient
 from tools import TOOLS_SCHEMA, execute_tool, TODO_MANAGER, BG_MANAGER
+from browser_tools import BROWSER_TOOLS_SCHEMA, BROWSER_SESSION
+from desktop_tools import DESKTOP_TOOLS_SCHEMA
 from tui import TUI
 
 # Tools that only read/query data — safe to auto-approve without prompting
 _READ_ONLY_TOOLS = {
     "read_file", "list_dir", "get_cwd", "find_files", "search_files",
     "get_file_info", "todo_write", "list_skills", "check_background",
+    "browser_screenshot", "browser_get_text", "browser_wait", "browser_get_elements",
+    "desktop_screenshot", "desktop_get_mouse_pos", "desktop_get_screen_size",
+    "desktop_find_image",
 }
 
 # Tools that require special post-call handling
@@ -52,6 +57,7 @@ class Agent:
         ]
         self.loop_count = 0
         self.rounds_since_todo = 0
+        self.browser_mode = False  # True when running a /claw task
         self._transcripts_dir = os.path.join(
             os.path.dirname(os.path.abspath(__file__)), ".transcripts"
         )
@@ -459,31 +465,32 @@ Read-only operations may be executed immediately without a prior text plan.
             # ── LLM Call ──────────────────────────────────────────────────
 
             # dispatch_task needs a closure over self, so I append it per-call
-            effective_tools = TOOLS_SCHEMA + [
-                {
-                    "type": "function",
-                    "function": {
-                        "name": "dispatch_task",
-                        "description": (
-                            "Spawn a sub-agent with a fresh context to handle a complex research "
-                            "or multi-file analysis task. The sub-agent runs independently and "
-                            "returns only a text summary — keeping the main conversation lean. "
-                            "Use for tasks like: 'analyse the entire codebase', "
-                            "'find all usages of X across all files', etc."
-                        ),
-                        "parameters": {
-                            "type": "object",
-                            "properties": {
-                                "prompt": {
-                                    "type": "string",
-                                    "description": "Detailed instructions for the sub-agent."
-                                }
-                            },
-                            "required": ["prompt"]
-                        }
+            dispatch_tool = {
+                "type": "function",
+                "function": {
+                    "name": "dispatch_task",
+                    "description": (
+                        "Spawn a sub-agent with a fresh context to handle a complex research "
+                        "or multi-file analysis task. The sub-agent runs independently and "
+                        "returns only a text summary — keeping the main conversation lean. "
+                        "Use for tasks like: 'analyse the entire codebase', "
+                        "'find all usages of X across all files', etc."
+                    ),
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "prompt": {
+                                "type": "string",
+                                "description": "Detailed instructions for the sub-agent."
+                            }
+                        },
+                        "required": ["prompt"]
                     }
                 }
-            ]
+            }
+            effective_tools = TOOLS_SCHEMA + [dispatch_tool]
+            if self.browser_mode:
+                effective_tools = effective_tools + BROWSER_TOOLS_SCHEMA + DESKTOP_TOOLS_SCHEMA
 
             try:
                 response = self.client.chat_completion(self.messages, tools=effective_tools)
@@ -731,7 +738,107 @@ Read-only operations may be executed immediately without a prior text plan.
             self.tui.print_info(BG_MANAGER.list_all())
             return True
 
+        elif command == "/claw":
+            task_desc = arg.strip()
+            if not task_desc:
+                self.tui.print_warn(
+                    "用法: /claw <任务描述>\n"
+                    "  例如: /claw 打开百度搜索hello world\n"
+                    "  例如: /claw 打开微信给张三发一条消息"
+                )
+                return True
+            self._run_claw_task(task_desc)
+            return True
+
         return False
+
+    # ── Claw Agent Mode (Browser + Desktop) ────────────────────────────────
+
+    _CLAW_SYSTEM_PROMPT = """
+== CLAW AGENT MODE (Browser + Desktop Automation) ==
+
+You have TWO sets of automation tools:
+
+### 1. Browser Tools (for web pages)
+Use these when the task involves websites, URLs, or web applications:
+- `browser_open` — Start browser and navigate to a URL
+- `browser_get_elements` — Discover clickable elements on the page
+- `browser_click` / `browser_type` / `browser_select` — Interact with web elements
+- `browser_screenshot` — Capture the current web page
+- `browser_get_text` — Read page content
+- `browser_close` — Close the browser when done
+
+### 2. Desktop Tools (for native desktop applications — cross-platform)
+Use these when the task involves desktop apps (WeChat, Finder, Notepad, etc.):
+- `desktop_open_app` — Open an application by name (cross-platform)
+- `desktop_screenshot` — Capture the ENTIRE SCREEN (critical for seeing the UI)
+- `desktop_click` / `desktop_double_click` — Click at screen coordinates
+- `desktop_type` — Type text (supports Chinese/CJK via clipboard, cross-platform)
+- `desktop_hotkey` — Press keyboard shortcuts (macOS: command+c, Linux/Win: ctrl+c)
+- `desktop_press_key` — Press a single key (enter, tab, etc.)
+- `desktop_move_mouse` — Move mouse to coordinates
+- `desktop_scroll` — Scroll at current position
+- `desktop_get_mouse_pos` — Check current mouse position
+- `desktop_get_screen_size` — Get screen resolution
+- `desktop_find_image` — Find an image pattern on screen
+
+### Decision Guide
+- Task mentions a URL or website → Use **browser tools**
+- Task mentions a desktop app (WeChat, Finder, etc.) → Use **desktop tools**
+- You can mix both tool sets if needed
+
+### Desktop Workflow
+1. Use `desktop_open_app` to launch the application
+2. ALWAYS take `desktop_screenshot` after opening and after each action
+3. Analyze the screenshot to find UI elements and determine coordinates
+4. Use `desktop_click` at the right coordinates to interact
+5. Use `desktop_type` to enter text (supports Chinese)
+6. Take another screenshot to verify the result
+
+IMPORTANT:
+- For desktop apps, you MUST take screenshots to see where to click!
+- Screenshot coordinates are based on screen resolution — use `desktop_get_screen_size` first.
+- After each click or type action, take another screenshot to verify it worked.
+- `desktop_type` automatically handles CJK text via clipboard + paste.
+- Use `desktop_hotkey` with the right modifier for the OS (command on macOS, ctrl on Linux/Win).
+"""
+
+    def _run_claw_task(self, task_description: str):
+        """Enter claw agent mode: inject browser+desktop prompt, run the task, auto-close."""
+        self.tui.print_info("🦀 启动 Claw Agent 模式（浏览器 + 桌面自动化）…")
+        self.browser_mode = True
+
+        # Inject the task as a user message
+        claw_prompt = (
+            f"[Claw Agent Task]\n"
+            f"{task_description}\n\n"
+            f"You have both browser and desktop automation tools available. "
+            f"Choose the right tools based on the task. "
+            f"Close the browser when done if you opened one."
+        )
+
+        # Temporarily augment the system prompt
+        original_system = self.messages[0]["content"]
+        self.messages[0]["content"] = original_system + self._CLAW_SYSTEM_PROMPT
+
+        try:
+            self.add_user_message(claw_prompt)
+            output = self.run_step()
+            if output:
+                self.tui.print_final_response(output)
+        except KeyboardInterrupt:
+            self.tui.print_interrupted()
+        except Exception as e:
+            self.tui.print_error(f"Claw agent error: {e}")
+        finally:
+            # Auto-close browser if still open
+            if BROWSER_SESSION.is_active:
+                result = BROWSER_SESSION.close()
+                self.tui.print_info(result)
+            # Restore original system prompt and exit claw mode
+            self.messages[0]["content"] = original_system
+            self.browser_mode = False
+            self.tui.print_info("🦀 已退出 Claw Agent 模式")
 
     def start_loop(self):
         """Run the main REPL — blocks until the user exits."""

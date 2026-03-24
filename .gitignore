@@ -1,6 +1,9 @@
 # ── Config & Secrets ──────────────────────────────────────────────────────────
 config.json
 session.json
+.transcripts/
+.browser_screenshots/
+.desktop_screenshots/
 # I ignore user-created skills by default — they often contain local paths or private context.
 # Delete the line below if you want to commit your own skills, or add per-file exceptions.
 skills/*.md

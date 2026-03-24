@@ -10,6 +10,9 @@ dependencies = [
     "httpx>=0.24",
     "prompt_toolkit>=3.0",
     "rich>=13.0",
+    "playwright>=1.40",
+    "pyautogui>=0.9",
+    "Pillow>=9.0",
 ]
 
 [project.urls]

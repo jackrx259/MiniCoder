@@ -65,8 +65,13 @@ def _rich_markdown_to_ansi(text: str, width: int = 100) -> str:
 _WRITE_TOOLS = {
     "write_file", "replace_in_file", "append_to_file", "create_skill",
     "delete_file", "move_file", "copy_file",
+    "browser_type", "browser_select",
+    "desktop_type", "desktop_scroll",
 }
-_EXEC_TOOLS = {"run_command", "change_dir"}
+_EXEC_TOOLS = {"run_command", "change_dir", "browser_open", "browser_click",
+               "browser_navigate", "browser_close", "browser_press_key",
+               "desktop_open_app", "desktop_click", "desktop_double_click",
+               "desktop_hotkey", "desktop_press_key", "desktop_move_mouse"}
 _READ_ONLY_TOOLS = {
     "read_file", "list_dir", "get_cwd", "find_files", "search_files", "get_file_info",
 }
@@ -413,6 +418,7 @@ class TUI:
             "  [bold white]/save [path][/]   [dim]Save session to file (default: session.json)[/]\n"
             "  [bold white]/load [path][/]   [dim]Load session from file (default: session.json)[/]\n"
             "  [bold white]/usage[/]         [dim]Show token usage statistics[/]\n"
+            "  [bold white]/claw <task>[/]   [dim]Claw agent mode — automate browser & desktop apps[/]\n"
             "  [bold white]exit / quit[/]    [dim]Exit MiniCoder (offers to save session)[/]\n"
             "  [bold white]Ctrl+D[/]         [dim]Quit immediately[/]\n"
             "  [bold white]Ctrl+C[/]         [dim]Interrupt current agent action[/]\n"
